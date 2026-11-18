@@ -8,6 +8,7 @@ import type { NavSection } from './Sidebar';
 interface TopBarProps {
   activeSection: NavSection;
   agencyName: string;
+  gateEmail?: string | null;
   user: User | null;
   hasWorkspaceToken: boolean;
   signingIn: boolean;
@@ -31,6 +32,7 @@ const SECTION_LABELS: Record<NavSection, string> = {
 export const TopBar: React.FC<TopBarProps> = ({
   activeSection,
   agencyName,
+  gateEmail,
   user,
   hasWorkspaceToken,
   signingIn,
@@ -93,23 +95,49 @@ export const TopBar: React.FC<TopBarProps> = ({
                 {hasWorkspaceToken ? 'Workspace actif' : 'Reconnecter Workspace'}
               </div>
             </div>
-            {!hasWorkspaceToken ? (
+            {!hasWorkspaceToken && (
               <GoogleSignInButton
                 onClick={onSignIn}
                 loading={signingIn}
                 label="Activer Drive & Agenda"
               />
-            ) : (
-              <button
-                type="button"
-                onClick={onSignOut}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
-                title="Se déconnecter"
-              >
-                <LogOut className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Déconnexion</span>
-              </button>
             )}
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+              title="Se déconnecter"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Déconnexion</span>
+            </button>
+          </div>
+        ) : gateEmail ? (
+          <div className="flex items-center gap-2.5">
+            <div className="hidden md:block text-right">
+              <div className="text-xs font-medium text-slate-900 truncate max-w-[160px]">
+                {gateEmail}
+              </div>
+              <div className="text-[11px] text-slate-500">Session Omnix</div>
+            </div>
+            <button
+              type="button"
+              onClick={onSignIn}
+              disabled={signingIn}
+              className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+              title="Optionnel : lier Google Calendar, Drive et Gmail"
+            >
+              <span>{signingIn ? 'Connexion...' : 'Lier Google'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+              title="Se déconnecter"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Déconnexion</span>
+            </button>
           </div>
         ) : (
           <GoogleSignInButton onClick={onSignIn} loading={signingIn} />

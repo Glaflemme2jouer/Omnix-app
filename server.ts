@@ -8,6 +8,12 @@ import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import { loadAgencyState, resetAgencyState, saveAgencyState } from './server/store.ts';
+import {
+  deleteMemberPassword,
+  hasMemberPassword,
+  setMemberPassword,
+  verifyMemberPassword,
+} from './server/credentials.ts';
 import type {
   AgencyAppointment,
   AgencyState,
@@ -112,6 +118,69 @@ async function verifyFirebaseIdToken(
   };
 }
 
+function setAuthCookie(res: Response, email: string): void {
+  const signed = signAuthCookie(email);
+  res.cookie(AUTH_COOKIE, signed, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+}
+
+function clearAuthCookie(res: Response): void {
+  res.clearCookie(AUTH_COOKIE, { httpOnly: true, secure: true, sameSite: 'none' });
+}
+
+function ensureMemberInState(
+  state: AgencyState,
+  opts: { email: string; name?: string; photoUrl?: string; preferredRole?: TeamMember['role'] }
+): { member: TeamMember; changed: boolean } {
+  const cleanEmail = opts.email.trim().toLowerCase();
+  let member = state.members.find(
+    (m) => m.email && m.email.trim().toLowerCase() === cleanEmail
+  );
+  let changed = false;
+
+  if (!member) {
+    const roleFallback: TeamMember['role'] =
+      state.members.length === 0 ? 'Chef de projet' : 'Développeur';
+    member = {
+      id: `mem-${Date.now()}`,
+      name: (opts.name || '').trim() || cleanEmail.split('@')[0],
+      email: cleanEmail,
+      photoUrl: opts.photoUrl,
+      role: opts.preferredRole || roleFallback,
+      weeklyHours: 0,
+      maxWeeklyHours: 5,
+      parentApproved: false,
+      parentName: 'À renseigner',
+      schoolPriorityOk: true,
+    };
+    state.members.push(member);
+    changed = true;
+  } else {
+    if (opts.name && opts.name.trim() && member.name !== opts.name.trim()) {
+      member.name = opts.name.trim();
+      changed = true;
+    }
+    if (opts.photoUrl && member.photoUrl !== opts.photoUrl) {
+      member.photoUrl = opts.photoUrl;
+      changed = true;
+    }
+  }
+
+  return { member, changed };
+}
+
+function buildAccessList(state: AgencyState) {
+  return state.settings.allowedEmails.map((email) => ({
+    email,
+    isAdmin: state.settings.adminEmails.includes(email),
+    hasPassword: hasMemberPassword(email),
+  }));
+}
+
 type ProviderName = 'github' | 'discord' | 'figma' | 'netlify';
 
 interface ProviderToken {
@@ -214,7 +283,7 @@ async function startServer() {
   app.use(express.json({ limit: '4mb' }));
   app.use(cookieParser());
 
-  // --- Access Gate & Firebase Session Endpoints (publicly reachable) ---
+  // --- Access Gate & Auth Session Endpoints (publicly reachable) ---
   app.get('/api/auth/gate', (req, res) => {
     const state = loadAgencyState();
     const verifiedCookie = verifyAuthCookie(req.cookies?.[AUTH_COOKIE]);
@@ -230,6 +299,100 @@ async function startServer() {
       authorized: state.settings.lockEnabled ? isAllowed : true,
       email,
       isAdmin,
+      hasPassword: email ? hasMemberPassword(email) : false,
+    });
+  });
+
+  app.post('/api/auth/register-admin', (req, res) => {
+    const { name, email, password } = req.body as {
+      name?: string;
+      email?: string;
+      password?: string;
+    };
+    const cleanEmail = (email || '').trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      res.status(400).json({ error: 'Veuillez saisir une adresse e-mail valide.' });
+      return;
+    }
+    if (!password || password.length < 6) {
+      res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères.' });
+      return;
+    }
+
+    const state = loadAgencyState();
+    if (state.settings.allowedEmails.length > 0) {
+      res.status(403).json({
+        error: 'Un administrateur existe déjà. Connectez-vous avec votre e-mail et votre mot de passe.',
+      });
+      return;
+    }
+
+    setMemberPassword(cleanEmail, password);
+    state.settings.allowedEmails = [cleanEmail];
+    state.settings.adminEmails = [cleanEmail];
+    ensureMemberInState(state, {
+      email: cleanEmail,
+      name: name?.trim() || cleanEmail.split('@')[0],
+      preferredRole: 'Chef de projet',
+    });
+    saveAgencyState(state);
+
+    setAuthCookie(res, cleanEmail);
+    res.json({
+      authorized: true,
+      email: cleanEmail,
+      isAdmin: true,
+    });
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    const { email, password } = req.body as { email?: string; password?: string };
+    const cleanEmail = (email || '').trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@') || !password) {
+      res.status(400).json({ error: 'Adresse e-mail et mot de passe requis.' });
+      return;
+    }
+
+    const state = loadAgencyState();
+    if (state.settings.allowedEmails.length === 0) {
+      res.status(400).json({
+        error: 'Aucun compte administrateur créé pour l’instant. Initialisez le premier accès ci-dessus.',
+      });
+      return;
+    }
+
+    if (state.settings.lockEnabled && !state.settings.allowedEmails.includes(cleanEmail)) {
+      clearAuthCookie(res);
+      res.status(403).json({
+        error: `Accès refusé pour ${cleanEmail}. Cet e-mail n’est pas dans la liste autorisée d’${state.settings.agencyName}.`,
+        code: 'NOT_ALLOWLISTED',
+      });
+      return;
+    }
+
+    if (!hasMemberPassword(cleanEmail)) {
+      res.status(401).json({
+        error: 'Aucun mot de passe n’est défini pour cet e-mail. Connectez-vous avec Google ou demandez à un administrateur de définir votre mot de passe dans Équipe & Caisse.',
+        code: 'PASSWORD_NOT_SET',
+      });
+      return;
+    }
+
+    if (!verifyMemberPassword(cleanEmail, password)) {
+      res.status(401).json({ error: 'E-mail ou mot de passe incorrect.' });
+      return;
+    }
+
+    const { changed } = ensureMemberInState(state, { email: cleanEmail });
+    if (changed) {
+      saveAgencyState(state);
+    }
+
+    setAuthCookie(res, cleanEmail);
+    res.json({
+      authorized: true,
+      email: cleanEmail,
+      isAdmin: state.settings.adminEmails.includes(cleanEmail),
     });
   });
 
@@ -252,7 +415,7 @@ async function startServer() {
       }
 
       if (state.settings.lockEnabled && !state.settings.allowedEmails.includes(verified.email)) {
-        res.clearCookie(AUTH_COOKIE, { httpOnly: true, secure: true, sameSite: 'none' });
+        clearAuthCookie(res);
         res.status(403).json({
           error: `Accès refusé pour ${verified.email}. Cet e-mail n’est pas dans la liste autorisée d’${state.settings.agencyName}.`,
           code: 'NOT_ALLOWLISTED',
@@ -261,13 +424,7 @@ async function startServer() {
         return;
       }
 
-      const signed = signAuthCookie(verified.email);
-      res.cookie(AUTH_COOKIE, signed, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'none',
-        maxAge: 30 * 24 * 60 * 60 * 1000,
-      });
+      setAuthCookie(res, verified.email);
 
       res.json({
         authorized: true,
@@ -280,20 +437,23 @@ async function startServer() {
   });
 
   app.post('/api/auth/logout', (_req, res) => {
-    res.clearCookie(AUTH_COOKIE, { httpOnly: true, secure: true, sameSite: 'none' });
+    clearAuthCookie(res);
     res.json({ ok: true });
   });
 
   // --- Protect all other /api routes when lockEnabled is active ---
   app.use('/api', (req, res, next) => {
     const state = loadAgencyState();
+    const verifiedCookie = verifyAuthCookie(req.cookies?.[AUTH_COOKIE]);
     if (!state.settings.lockEnabled) {
+      if (verifiedCookie) {
+        (req as any).authEmail = verifiedCookie.email;
+      }
       next();
       return;
     }
-    const verifiedCookie = verifyAuthCookie(req.cookies?.[AUTH_COOKIE]);
     if (!verifiedCookie) {
-      res.status(401).json({ error: 'Connexion Google requise pour accéder à Omnix.', code: 'AUTH_REQUIRED' });
+      res.status(401).json({ error: 'Connexion requise pour accéder à Omnix.', code: 'AUTH_REQUIRED' });
       return;
     }
     if (!state.settings.allowedEmails.includes(verifiedCookie.email)) {
@@ -308,10 +468,173 @@ async function startServer() {
     next();
   });
 
+  // --- Password & Access Management (authenticated) ---
+  app.post('/api/auth/change-password', (req, res) => {
+    const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
+    const { newPassword, email } = req.body as { newPassword?: string; email?: string };
+    const targetEmail = authEmail || (email || '').trim().toLowerCase();
+    if (!targetEmail || !targetEmail.includes('@')) {
+      res.status(400).json({ error: 'Session utilisateur requise.' });
+      return;
+    }
+    if (!newPassword || newPassword.length < 6) {
+      res.status(400).json({ error: 'Le nouveau mot de passe doit contenir au moins 6 caractères.' });
+      return;
+    }
+    setMemberPassword(targetEmail, newPassword);
+    res.json({ ok: true, email: targetEmail });
+  });
+
+  app.get('/api/agency/access/status', (_req, res) => {
+    const state = loadAgencyState();
+    res.json({ members: buildAccessList(state) });
+  });
+
+  app.post('/api/agency/access/member', (req, res) => {
+    const state = loadAgencyState();
+    const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
+    if (
+      state.settings.lockEnabled &&
+      state.settings.adminEmails.length > 0 &&
+      (!authEmail || !state.settings.adminEmails.includes(authEmail))
+    ) {
+      res.status(403).json({ error: 'Seul un administrateur Omnix peut gérer les accès.' });
+      return;
+    }
+
+    const { email, password, isAdmin, name } = req.body as {
+      email?: string;
+      password?: string;
+      isAdmin?: boolean;
+      name?: string;
+    };
+    const cleanEmail = (email || '').trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      res.status(400).json({ error: 'Adresse e-mail invalide.' });
+      return;
+    }
+
+    if (password !== undefined && password !== '') {
+      if (password.length < 6) {
+        res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères.' });
+        return;
+      }
+      setMemberPassword(cleanEmail, password);
+    }
+
+    if (!state.settings.allowedEmails.includes(cleanEmail)) {
+      state.settings.allowedEmails = [...state.settings.allowedEmails, cleanEmail];
+    }
+
+    if (typeof isAdmin === 'boolean') {
+      if (isAdmin) {
+        if (!state.settings.adminEmails.includes(cleanEmail)) {
+          state.settings.adminEmails = [...state.settings.adminEmails, cleanEmail];
+        }
+      } else {
+        const remainingAdmins = state.settings.adminEmails.filter((a) => a !== cleanEmail);
+        if (remainingAdmins.length === 0) {
+          res.status(400).json({ error: 'Au moins un administrateur doit rester actif.' });
+          return;
+        }
+        state.settings.adminEmails = remainingAdmins;
+      }
+    }
+
+    if (name && name.trim()) {
+      ensureMemberInState(state, { email: cleanEmail, name: name.trim() });
+    }
+
+    saveAgencyState(state);
+    res.json({ state, accessMembers: buildAccessList(state) });
+  });
+
+  app.delete('/api/agency/access/member', (req, res) => {
+    const state = loadAgencyState();
+    const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
+    if (
+      state.settings.lockEnabled &&
+      state.settings.adminEmails.length > 0 &&
+      (!authEmail || !state.settings.adminEmails.includes(authEmail))
+    ) {
+      res.status(403).json({ error: 'Seul un administrateur Omnix peut retirer un accès.' });
+      return;
+    }
+
+    const emailParam = (req.body?.email || req.query?.email || '') as string;
+    const cleanEmail = emailParam.trim().toLowerCase();
+    if (!cleanEmail) {
+      res.status(400).json({ error: 'E-mail requis.' });
+      return;
+    }
+
+    const nextAdmins = state.settings.adminEmails.filter((a) => a !== cleanEmail);
+    const nextAllowed = state.settings.allowedEmails.filter((e) => e !== cleanEmail);
+    if (state.settings.lockEnabled && nextAdmins.length === 0) {
+      res.status(400).json({ error: 'Impossible de supprimer le dernier administrateur.' });
+      return;
+    }
+
+    state.settings.allowedEmails = nextAllowed;
+    state.settings.adminEmails = nextAdmins;
+    deleteMemberPassword(cleanEmail);
+    saveAgencyState(state);
+    res.json({ state, accessMembers: buildAccessList(state) });
+  });
+
   // --- Agency Shared State API ---
   app.get('/api/agency/state', (_req, res) => {
     const state = loadAgencyState();
     res.json(state);
+  });
+
+  app.post('/api/agency/import', (req, res) => {
+    const current = loadAgencyState();
+    const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
+    if (
+      current.settings.lockEnabled &&
+      current.settings.adminEmails.length > 0 &&
+      (!authEmail || !current.settings.adminEmails.includes(authEmail))
+    ) {
+      res.status(403).json({ error: 'Seul un administrateur peut importer une sauvegarde.' });
+      return;
+    }
+
+    const incoming = req.body as Partial<AgencyState>;
+    if (!incoming || !incoming.settings || !Array.isArray(incoming.projects)) {
+      res.status(400).json({ error: 'Fichier de sauvegarde Omnix invalide.' });
+      return;
+    }
+
+    const merged: AgencyState = {
+      ...current,
+      ...incoming,
+      settings: {
+        ...current.settings,
+        ...incoming.settings,
+        allowedEmails:
+          Array.isArray(incoming.settings.allowedEmails) && incoming.settings.allowedEmails.length > 0
+            ? incoming.settings.allowedEmails
+            : current.settings.allowedEmails,
+        adminEmails:
+          Array.isArray(incoming.settings.adminEmails) && incoming.settings.adminEmails.length > 0
+            ? incoming.settings.adminEmails
+            : current.settings.adminEmails,
+      },
+      members: Array.isArray(incoming.members) ? incoming.members : current.members,
+      projects: Array.isArray(incoming.projects) ? incoming.projects : current.projects,
+      tasks: Array.isArray(incoming.tasks) ? incoming.tasks : current.tasks,
+      appointments: Array.isArray(incoming.appointments) ? incoming.appointments : current.appointments,
+      prospects: Array.isArray(incoming.prospects) ? incoming.prospects : current.prospects,
+      finances: Array.isArray(incoming.finances) ? incoming.finances : current.finances,
+      preSaleChecklist: Array.isArray(incoming.preSaleChecklist)
+        ? incoming.preSaleChecklist
+        : current.preSaleChecklist,
+      roadmap: Array.isArray(incoming.roadmap) ? incoming.roadmap : current.roadmap,
+    };
+
+    saveAgencyState(merged);
+    res.json({ state: merged });
   });
 
   app.post('/api/agency/reset', (_req, res) => {
@@ -331,29 +654,13 @@ async function startServer() {
       return;
     }
     const state = loadAgencyState();
-    let member = state.members.find(
-      (m) => m.email && m.email.toLowerCase() === email.toLowerCase()
-    );
-    if (!member) {
-      const roleFallback: TeamMember['role'] =
-        state.members.length === 0 ? 'Chef de projet' : 'Développeur';
-      member = {
-        id: `mem-${Date.now()}`,
-        name: name || email.split('@')[0],
-        email,
-        photoUrl,
-        role: preferredRole || roleFallback,
-        weeklyHours: 0,
-        maxWeeklyHours: 5,
-        parentApproved: false,
-        parentName: 'À renseigner',
-        schoolPriorityOk: true,
-      };
-      state.members.push(member);
-      saveAgencyState(state);
-    } else if (name && member.name !== name) {
-      member.name = name;
-      if (photoUrl) member.photoUrl = photoUrl;
+    const { member, changed } = ensureMemberInState(state, {
+      email,
+      name,
+      photoUrl,
+      preferredRole,
+    });
+    if (changed) {
       saveAgencyState(state);
     }
     res.json({ member, state });

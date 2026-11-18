@@ -10,7 +10,7 @@ import { CalendarView } from './components/views/CalendarView';
 import { ProspectsOutreachView } from './components/views/ProspectsOutreachView';
 import { IntegrationsHubView } from './components/views/IntegrationsHubView';
 import { TeamFinanceView } from './components/views/TeamFinanceView';
-import { ShieldCheck, LogOut } from 'lucide-react';
+import { ShieldCheck, LogOut, Eye, EyeOff, KeyRound } from 'lucide-react';
 import { GoogleSignInButton } from './components/GoogleSignInButton';
 import { googleSignIn, initAuth, logoutGoogle } from './lib/firebaseAuth';
 import type {
@@ -58,6 +58,12 @@ export default function App() {
   const [workspaceToken, setWorkspaceToken] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [providerStatuses, setProviderStatuses] = useState<ThirdPartyProviderStatus[]>([]);
+
+  const [loginName, setLoginName] = useState('');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
 
   const fetchAgencyState = useCallback(async () => {
     try {
@@ -229,6 +235,44 @@ export default function App() {
     await refreshGateAndData();
   };
 
+  const handlePasswordAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setGateError('');
+    try {
+      const endpoint = gate.hasAdmin ? '/api/auth/login' : '/api/auth/register-admin';
+      const payload = gate.hasAdmin
+        ? { email: loginEmail, password: loginPassword }
+        : { name: loginName, email: loginEmail, password: loginPassword };
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setGateError(data.error || 'Connexion impossible.');
+        return;
+      }
+
+      setLoginPassword('');
+      setGate((prev) => ({
+        ...prev,
+        checked: true,
+        authorized: true,
+        hasAdmin: true,
+        email: data.email || loginEmail.trim().toLowerCase(),
+        isAdmin: Boolean(data.isAdmin),
+      }));
+      await Promise.all([fetchAgencyState(), fetchOAuthStatuses()]);
+    } catch (err: any) {
+      setGateError(err?.message || 'Erreur réseau lors de la connexion.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   // --- Agency Mutations ---
   const handleToggleChecklist = async (id: string, completed: boolean) => {
     const res = await fetch(`/api/agency/checklist/${id}`, {
@@ -387,7 +431,7 @@ export default function App() {
   if (!gate.authorized) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#f5f6f8] p-6">
-        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-7 shadow-sm space-y-6">
+        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-7 shadow-sm space-y-5">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-xs font-bold text-white tracking-wide">
               OM
@@ -397,24 +441,28 @@ export default function App() {
                 {gate.agencyName} — Accès équipe
               </h1>
               <p className="text-xs text-slate-500">
-                Espace partagé protégé par liste blanche Google
+                Espace privé réservé aux membres autorisés
               </p>
             </div>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 text-xs leading-relaxed text-slate-700 space-y-2">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 text-xs leading-relaxed text-slate-700 space-y-1.5">
             <div className="flex items-center gap-2 font-semibold text-slate-900">
-              <ShieldCheck className="h-4 w-4 text-blue-600 shrink-0" />
+              {gate.hasAdmin ? (
+                <KeyRound className="h-4 w-4 text-blue-600 shrink-0" />
+              ) : (
+                <ShieldCheck className="h-4 w-4 text-blue-600 shrink-0" />
+              )}
               <span>
                 {gate.hasAdmin
-                  ? 'Espace privé réservé aux membres invités'
-                  : 'Initialisation du premier administrateur'}
+                  ? 'Connexion directe par e-mail et mot de passe'
+                  : 'Créer l’accès administrateur Omnix'}
               </span>
             </div>
             <p className="text-slate-600">
               {gate.hasAdmin
-                ? 'Connectez-vous avec votre adresse Google autorisée pour accéder aux projets, à la caisse et à Jarvis. Les comptes externes sont automatiquement bloqués.'
-                : 'C’est le premier lancement : le premier compte Google qui se connecte devient administrateur et pourra autoriser votre fils et ses coéquipiers.'}
+                ? 'Saisissez votre e-mail d’équipe et votre mot de passe Omnix. Aucune vérification Google n’est requise.'
+                : 'Premier lancement : choisissez votre e-mail et votre mot de passe administrateur. Vous pourrez ensuite créer des accès pour votre fils et ses coéquipiers.'}
             </p>
           </div>
 
@@ -428,17 +476,94 @@ export default function App() {
                   className="inline-flex items-center gap-1.5 font-semibold text-red-800 hover:underline"
                 >
                   <LogOut className="h-3.5 w-3.5" />
-                  <span>Changer de compte Google</span>
+                  <span>Réinitialiser la session Google</span>
                 </button>
               )}
             </div>
           )}
 
-          <div className="flex flex-col gap-3">
+          <form onSubmit={handlePasswordAuthSubmit} className="space-y-3.5">
+            {!gate.hasAdmin && (
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Votre prénom ou nom
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={loginName}
+                  onChange={(e) => setLoginName(e.target.value)}
+                  placeholder="Ex : Louis"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+            )}
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Adresse e-mail
+              </label>
+              <input
+                type="email"
+                required
+                autoComplete="email"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                placeholder="vous@exemple.com"
+                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Mot de passe {!gate.hasAdmin && '(6 caractères minimum)'}
+              </label>
+              <div className="relative">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  required
+                  minLength={gate.hasAdmin ? 1 : 6}
+                  autoComplete={gate.hasAdmin ? 'current-password' : 'new-password'}
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 pr-10 text-sm text-slate-900 focus:border-blue-500 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  className="absolute inset-y-0 right-0 flex items-center px-3 text-slate-400 hover:text-slate-700"
+                  aria-label={showPassword ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={authLoading}
+              className="w-full rounded-lg bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60 transition-colors"
+            >
+              {authLoading
+                ? 'Vérification...'
+                : gate.hasAdmin
+                  ? 'Se connecter à Omnix'
+                  : 'Créer mon compte administrateur'}
+            </button>
+          </form>
+
+          <div className="relative flex items-center py-1">
+            <div className="flex-grow border-t border-slate-200" />
+            <span className="mx-3 shrink text-[11px] text-slate-400">ou</span>
+            <div className="flex-grow border-t border-slate-200" />
+          </div>
+
+          <div className="flex flex-col gap-2">
             <GoogleSignInButton
               onClick={handleGoogleSignIn}
               loading={signingIn}
-              label="Se connecter avec Google"
+              label="Continuer avec Google (optionnel)"
             />
           </div>
         </div>
@@ -484,6 +609,7 @@ export default function App() {
         <TopBar
           activeSection={activeSection}
           agencyName={state.settings.agencyName}
+          gateEmail={gate.email}
           user={user}
           hasWorkspaceToken={Boolean(workspaceToken)}
           signingIn={signingIn}
@@ -582,6 +708,7 @@ export default function App() {
               onAddMember={handleAddMember}
               onAddFinance={handleAddFinance}
               onUpdateSettings={handleUpdateSettings}
+              onStateReplaced={(nextState) => setState(nextState)}
             />
           )}
         </main>

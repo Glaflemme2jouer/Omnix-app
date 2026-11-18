@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Plus,
   ShieldAlert,
@@ -11,6 +11,9 @@ import {
   Check,
   Trash2,
   Lock,
+  KeyRound,
+  Download,
+  Upload,
 } from 'lucide-react';
 import type {
   AgencyRole,
@@ -20,6 +23,12 @@ import type {
   TeamMember,
 } from '../../types';
 
+interface AccessMemberStatus {
+  email: string;
+  isAdmin: boolean;
+  hasPassword: boolean;
+}
+
 interface TeamFinanceViewProps {
   state: AgencyState;
   currentUserEmail: string;
@@ -27,6 +36,7 @@ interface TeamFinanceViewProps {
   onAddMember: (payload: Partial<TeamMember>) => Promise<void>;
   onAddFinance: (payload: Partial<FinanceEntry>) => Promise<void>;
   onUpdateSettings: (updates: Partial<AgencyState['settings']>) => Promise<void>;
+  onStateReplaced: (nextState: AgencyState) => void;
 }
 
 const ROLES: AgencyRole[] = [
@@ -54,6 +64,7 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
   onAddMember,
   onAddFinance,
   onUpdateSettings,
+  onStateReplaced,
 }) => {
   const [newMemberName, setNewMemberName] = useState('');
   const [newMemberRole, setNewMemberRole] = useState<AgencyRole>('Chef de projet');
@@ -63,8 +74,17 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
   const [finType, setFinType] = useState<FinanceEntry['type']>('Acompte 30 %');
 
   const [inviteEmail, setInviteEmail] = useState('');
+  const [invitePassword, setInvitePassword] = useState('');
   const [inviteAsAdmin, setInviteAsAdmin] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+
+  const [accessMembers, setAccessMembers] = useState<AccessMemberStatus[]>([]);
+  const [accessMessage, setAccessMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [editingPasswordEmail, setEditingPasswordEmail] = useState<string | null>(null);
+  const [editingPasswordValue, setEditingPasswordValue] = useState('');
+  const [myNewPassword, setMyNewPassword] = useState('');
+  const [savingAccess, setSavingAccess] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const normalizedUserEmail = currentUserEmail.trim().toLowerCase();
   const isAdmin =
@@ -75,6 +95,21 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
     typeof window !== 'undefined'
       ? window.location.origin.replace('ais-dev-', 'ais-pre-')
       : '';
+
+  const fetchAccessStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/agency/access/status');
+      if (!res.ok) return;
+      const data = (await res.json()) as { members: AccessMemberStatus[] };
+      setAccessMembers(data.members || []);
+    } catch {
+      // Ignore background fetch error
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAccessStatus();
+  }, [fetchAccessStatus, state.settings.allowedEmails.length, state.settings.adminEmails.length]);
 
   const handleCopyShareLink = async () => {
     if (!sharedAppUrl) return;
@@ -87,29 +122,189 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
     e.preventDefault();
     const cleaned = inviteEmail.trim().toLowerCase();
     if (!cleaned || !cleaned.includes('@')) return;
-    const nextAllowed = Array.from(new Set([...state.settings.allowedEmails, cleaned]));
-    const nextAdmins = inviteAsAdmin
-      ? Array.from(new Set([...state.settings.adminEmails, cleaned]))
-      : state.settings.adminEmails;
-    await onUpdateSettings({ allowedEmails: nextAllowed, adminEmails: nextAdmins });
-    setInviteEmail('');
-    setInviteAsAdmin(false);
+    if (invitePassword && invitePassword.trim().length < 6) {
+      setAccessMessage({
+        type: 'err',
+        text: 'Le mot de passe doit contenir au moins 6 caractères.',
+      });
+      return;
+    }
+
+    setSavingAccess(true);
+    setAccessMessage(null);
+    try {
+      const res = await fetch('/api/agency/access/member', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: cleaned,
+          password: invitePassword.trim() || undefined,
+          isAdmin: inviteAsAdmin,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAccessMessage({ type: 'err', text: data.error || 'Impossible d’autoriser ce membre.' });
+        return;
+      }
+      if (data.state) onStateReplaced(data.state);
+      if (data.accessMembers) setAccessMembers(data.accessMembers);
+      setInviteEmail('');
+      setInvitePassword('');
+      setInviteAsAdmin(false);
+      setAccessMessage({
+        type: 'ok',
+        text: invitePassword.trim()
+          ? `Accès créé pour ${cleaned} avec mot de passe.`
+          : `Adresse ${cleaned} autorisée.`,
+      });
+    } finally {
+      setSavingAccess(false);
+    }
+  };
+
+  const handleSetMemberPassword = async (email: string) => {
+    if (editingPasswordValue.trim().length < 6) {
+      setAccessMessage({
+        type: 'err',
+        text: 'Le mot de passe doit contenir au moins 6 caractères.',
+      });
+      return;
+    }
+    setSavingAccess(true);
+    setAccessMessage(null);
+    try {
+      const res = await fetch('/api/agency/access/member', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password: editingPasswordValue.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAccessMessage({ type: 'err', text: data.error || 'Erreur lors de la mise à jour.' });
+        return;
+      }
+      if (data.state) onStateReplaced(data.state);
+      if (data.accessMembers) setAccessMembers(data.accessMembers);
+      setEditingPasswordEmail(null);
+      setEditingPasswordValue('');
+      setAccessMessage({ type: 'ok', text: `Mot de passe mis à jour pour ${email}.` });
+    } finally {
+      setSavingAccess(false);
+    }
   };
 
   const handleToggleAdmin = async (email: string) => {
     const isCurrentlyAdmin = state.settings.adminEmails.includes(email);
     if (isCurrentlyAdmin && state.settings.adminEmails.length <= 1) return;
-    const nextAdmins = isCurrentlyAdmin
-      ? state.settings.adminEmails.filter((a) => a !== email)
-      : [...state.settings.adminEmails, email];
-    await onUpdateSettings({ adminEmails: nextAdmins });
+    setSavingAccess(true);
+    setAccessMessage(null);
+    try {
+      const res = await fetch('/api/agency/access/member', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, isAdmin: !isCurrentlyAdmin }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAccessMessage({ type: 'err', text: data.error || 'Modification impossible.' });
+        return;
+      }
+      if (data.state) onStateReplaced(data.state);
+      if (data.accessMembers) setAccessMembers(data.accessMembers);
+    } finally {
+      setSavingAccess(false);
+    }
   };
 
   const handleRemoveAllowedEmail = async (email: string) => {
-    const nextAllowed = state.settings.allowedEmails.filter((e) => e !== email);
-    const nextAdmins = state.settings.adminEmails.filter((a) => a !== email);
-    if (state.settings.lockEnabled && nextAdmins.length === 0) return;
-    await onUpdateSettings({ allowedEmails: nextAllowed, adminEmails: nextAdmins });
+    setSavingAccess(true);
+    setAccessMessage(null);
+    try {
+      const res = await fetch('/api/agency/access/member', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAccessMessage({ type: 'err', text: data.error || 'Suppression impossible.' });
+        return;
+      }
+      if (data.state) onStateReplaced(data.state);
+      if (data.accessMembers) setAccessMembers(data.accessMembers);
+    } finally {
+      setSavingAccess(false);
+    }
+  };
+
+  const handleChangeMyPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (myNewPassword.trim().length < 6) {
+      setAccessMessage({
+        type: 'err',
+        text: 'Votre mot de passe doit contenir au moins 6 caractères.',
+      });
+      return;
+    }
+    setSavingAccess(true);
+    setAccessMessage(null);
+    try {
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newPassword: myNewPassword.trim(), email: normalizedUserEmail }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAccessMessage({ type: 'err', text: data.error || 'Impossible de modifier le mot de passe.' });
+        return;
+      }
+      setMyNewPassword('');
+      await fetchAccessStatus();
+      setAccessMessage({
+        type: 'ok',
+        text: 'Votre mot de passe Omnix est enregistré. Vous pourrez l’utiliser à la prochaine connexion.',
+      });
+    } finally {
+      setSavingAccess(false);
+    }
+  };
+
+  const handleExportBackup = () => {
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `omnix-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const res = await fetch('/api/agency/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAccessMessage({ type: 'err', text: data.error || 'Import impossible.' });
+        return;
+      }
+      if (data.state) onStateReplaced(data.state);
+      await fetchAccessStatus();
+      setAccessMessage({ type: 'ok', text: 'Sauvegarde restaurée avec succès.' });
+    } catch {
+      setAccessMessage({ type: 'err', text: 'Fichier JSON invalide.' });
+    } finally {
+      e.target.value = '';
+    }
   };
 
   const paidRevenue = state.finances
@@ -158,7 +353,7 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
               </h2>
             </div>
             <p className="mt-1 text-xs text-slate-500">
-              Seules les adresses Google ci-dessous peuvent ouvrir {state.settings.agencyName}. Toute autre personne est bloquée automatiquement.
+              Vos coéquipiers se connectent directement avec leur e-mail et leur mot de passe Omnix (sans blocage Google).
             </p>
           </div>
 
@@ -182,69 +377,156 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
           )}
         </div>
 
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <div className="space-y-3">
-            <div className="text-xs font-semibold text-slate-800">
-              1. Lien partagé à envoyer à votre fils et ses potes
+        {accessMessage && (
+          <div
+            className={`rounded-lg border px-3.5 py-2.5 text-xs ${
+              accessMessage.type === 'ok'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                : 'border-red-200 bg-red-50 text-red-700'
+            }`}
+          >
+            {accessMessage.text}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <div className="space-y-4">
+            <div className="space-y-2.5">
+              <div className="text-xs font-semibold text-slate-800">
+                1. Lien partagé à envoyer à votre fils et ses potes
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={sharedAppUrl}
+                  className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-700"
+                />
+                <button
+                  type="button"
+                  onClick={handleCopyShareLink}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
+                >
+                  {copiedLink ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span>{copiedLink ? 'Copié' : 'Copier'}</span>
+                </button>
+              </div>
+              <p className="text-[11px] leading-relaxed text-slate-500">
+                Tous les membres connectés sur ce lien travaillent sur le même espace Omnix (mêmes projets, tâches, caisse et Jarvis). Le bouton Google reste optionnel uniquement pour synchroniser Calendar, Drive ou Gmail.
+              </p>
             </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                readOnly
-                value={sharedAppUrl}
-                className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-700"
-              />
-              <button
-                type="button"
-                onClick={handleCopyShareLink}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
+
+            {normalizedUserEmail && (
+              <form
+                onSubmit={handleChangeMyPassword}
+                className="space-y-2 border-t border-slate-100 pt-4"
               >
-                {copiedLink ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                <span>{copiedLink ? 'Copié' : 'Copier'}</span>
-              </button>
-            </div>
-            <p className="text-[11px] leading-relaxed text-slate-500">
-              Tous les membres connectés sur ce lien travaillent sur le même espace Omnix (mêmes projets, tâches, caisse et Jarvis). Pensez aussi à ajouter leurs adresses Gmail dans{' '}
-              <span className="font-medium text-slate-700">
-                Google Cloud Console → Écran de consentement OAuth → Utilisateurs test
-              </span>{' '}
-              pour qu’ils puissent activer Calendar, Drive et Gmail.
-            </p>
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
+                  <KeyRound className="h-3.5 w-3.5 text-blue-600" />
+                  <span>Mon mot de passe Omnix ({normalizedUserEmail})</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    minLength={6}
+                    required
+                    value={myNewPassword}
+                    onChange={(e) => setMyNewPassword(e.target.value)}
+                    placeholder="Nouveau mot de passe (min. 6 car.)"
+                    className="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs"
+                  />
+                  <button
+                    type="submit"
+                    disabled={savingAccess}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                  >
+                    Enregistrer
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {isAdmin && (
+              <div className="space-y-2 border-t border-slate-100 pt-4">
+                <div className="text-xs font-semibold text-slate-800">
+                  Sauvegarde Render / PC (.json)
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Sur Render gratuit, les données locales peuvent se réinitialiser lors d’un redémarrage : exportez une copie de secours ou restaurez-la ici.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleExportBackup}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Exporter (.json)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => importInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                  >
+                    <Upload className="h-3.5 w-3.5" />
+                    <span>Restaurer (.json)</span>
+                  </button>
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={handleImportBackup}
+                    className="hidden"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="space-y-3">
             <div className="text-xs font-semibold text-slate-800">
-              2. Adresses Google autorisées ({state.settings.allowedEmails.length})
+              2. Comptes d’équipe autorisés ({state.settings.allowedEmails.length})
             </div>
 
             {isAdmin && (
               <form onSubmit={handleAddAllowedEmail} className="space-y-2">
-                <div className="flex items-center gap-2">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <input
                     type="email"
                     required
                     value={inviteEmail}
                     onChange={(e) => setInviteEmail(e.target.value)}
                     placeholder="prenom.pote@gmail.com"
-                    className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-xs"
+                    className="rounded-lg border border-slate-200 px-3 py-2 text-xs"
                   />
+                  <input
+                    type="text"
+                    minLength={6}
+                    value={invitePassword}
+                    onChange={(e) => setInvitePassword(e.target.value)}
+                    placeholder="Mot de passe (min. 6 car.)"
+                    className="rounded-lg border border-slate-200 px-3 py-2 text-xs"
+                  />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="inline-flex items-center gap-2 text-[11px] text-slate-600 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={inviteAsAdmin}
+                      onChange={(e) => setInviteAsAdmin(e.target.checked)}
+                      className="rounded border-slate-300"
+                    />
+                    <span>Droits administrateur</span>
+                  </label>
                   <button
                     type="submit"
+                    disabled={savingAccess}
                     className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700 whitespace-nowrap shrink-0"
                   >
                     <Plus className="h-3.5 w-3.5" />
-                    <span>Autoriser</span>
+                    <span>Créer / Autoriser</span>
                   </button>
                 </div>
-                <label className="inline-flex items-center gap-2 text-[11px] text-slate-600 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={inviteAsAdmin}
-                    onChange={(e) => setInviteAsAdmin(e.target.checked)}
-                    className="rounded border-slate-300"
-                  />
-                  <span>Donner les droits d’administrateur (pour qu’il puisse gérer ses potes)</span>
-                </label>
               </form>
             )}
 
@@ -257,38 +539,77 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
                 state.settings.allowedEmails.map((email) => {
                   const isItemAdmin = state.settings.adminEmails.includes(email);
                   const isLastAdmin = isItemAdmin && state.settings.adminEmails.length <= 1;
+                  const statusEntry = accessMembers.find((m) => m.email === email);
+                  const hasPassword = statusEntry?.hasPassword ?? false;
+                  const isEditingThis = editingPasswordEmail === email;
+
                   return (
-                    <div
-                      key={email}
-                      className="flex items-center justify-between gap-2 px-3 py-2 text-xs"
-                    >
-                      <div className="min-w-0 truncate">
-                        <span className="font-medium text-slate-800">{email}</span>
-                        <span className="ml-2 text-[11px] text-slate-500">
-                          · {isItemAdmin ? 'Admin' : 'Membre'}
-                        </span>
-                      </div>
-                      {isAdmin && (
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            disabled={isLastAdmin}
-                            onClick={() => handleToggleAdmin(email)}
-                            className="text-[11px] font-medium text-blue-600 hover:underline disabled:opacity-40 disabled:no-underline"
-                          >
-                            {isItemAdmin ? 'Retirer admin' : 'Passer admin'}
-                          </button>
-                          {!isLastAdmin && (
+                    <div key={email} className="px-3 py-2.5 text-xs space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-medium text-slate-800 truncate">{email}</div>
+                          <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
+                            <span>{isItemAdmin ? 'Admin' : 'Membre'}</span>
+                            <span aria-hidden="true">·</span>
+                            <span className={hasPassword ? 'text-emerald-700' : 'text-amber-700'}>
+                              {hasPassword ? 'Mot de passe actif' : 'Aucun mot de passe'}
+                            </span>
+                          </div>
+                        </div>
+                        {isAdmin && (
+                          <div className="flex items-center gap-2.5 shrink-0">
                             <button
                               type="button"
-                              onClick={() => handleRemoveAllowedEmail(email)}
-                              className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
-                              title="Retirer l’accès"
-                              aria-label={`Retirer ${email}`}
+                              onClick={() => {
+                                setEditingPasswordEmail(isEditingThis ? null : email);
+                                setEditingPasswordValue('');
+                              }}
+                              className="text-[11px] font-medium text-slate-700 hover:underline whitespace-nowrap"
                             >
-                              <Trash2 className="h-3.5 w-3.5" />
+                              {isEditingThis ? 'Fermer' : hasPassword ? 'Changer MDP' : 'Définir MDP'}
                             </button>
-                          )}
+                            <button
+                              type="button"
+                              disabled={isLastAdmin || savingAccess}
+                              onClick={() => handleToggleAdmin(email)}
+                              className="text-[11px] font-medium text-blue-600 hover:underline disabled:opacity-40 disabled:no-underline whitespace-nowrap"
+                            >
+                              {isItemAdmin ? 'Retirer admin' : 'Passer admin'}
+                            </button>
+                            {!isLastAdmin && (
+                              <button
+                                type="button"
+                                disabled={savingAccess}
+                                onClick={() => handleRemoveAllowedEmail(email)}
+                                className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                                title="Retirer l’accès"
+                                aria-label={`Retirer ${email}`}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {isAdmin && isEditingThis && (
+                        <div className="flex items-center gap-2 pt-1">
+                          <input
+                            type="text"
+                            minLength={6}
+                            value={editingPasswordValue}
+                            onChange={(e) => setEditingPasswordValue(e.target.value)}
+                            placeholder="Nouveau mot de passe (min. 6 car.)"
+                            className="flex-1 rounded border border-slate-200 bg-white px-2.5 py-1 text-xs"
+                          />
+                          <button
+                            type="button"
+                            disabled={savingAccess}
+                            onClick={() => handleSetMemberPassword(email)}
+                            className="rounded bg-slate-900 px-3 py-1 text-[11px] font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
+                          >
+                            Valider
+                          </button>
                         </div>
                       )}
                     </div>
@@ -367,7 +688,7 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
               Équipe & rotation mensuelle des rôles
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Chaque personne qui se connecte avec Google apparaît ici automatiquement, ou ajoutez un membre manuellement.
+              Chaque personne qui se connecte (mot de passe ou Google) apparaît ici automatiquement, ou ajoutez un membre manuellement.
             </p>
           </div>
 
@@ -407,7 +728,7 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
             </div>
             <p className="text-xs font-semibold text-slate-900">Aucun membre inscrit pour le moment</p>
             <p className="mt-1 max-w-md text-xs text-slate-500">
-              Connectez-vous avec Google en haut à droite ou ajoutez vos prénoms ci-dessus pour attribuer les 5 rôles du mois.
+              Ajoutez vos prénoms ci-dessus ou connectez vos coéquipiers avec leur mot de passe pour attribuer les 5 rôles du mois.
             </p>
           </div>
         ) : (
