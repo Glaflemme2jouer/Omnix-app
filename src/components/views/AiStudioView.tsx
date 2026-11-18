@@ -23,10 +23,12 @@ import { ConfirmModal } from '../ConfirmModal';
 
 interface AiStudioViewProps {
   projects: ClientProject[];
+  activeProjectId?: string;
+  onSelectProjectId?: (id: string) => void;
   workspaceToken: string | null;
   providerStatuses: ThirdPartyProviderStatus[];
   onSaveProjectHtml: (projectId: string, html: string) => Promise<void>;
-  onCreateProjectWithHtml: (clientName: string, html: string) => Promise<void>;
+  onCreateProjectWithHtml: (clientName: string, html: string) => Promise<ClientProject>;
 }
 
 const DEMO_PRESETS = [
@@ -61,12 +63,16 @@ const PALETTES = [
 
 export const AiStudioView: React.FC<AiStudioViewProps> = ({
   projects,
+  activeProjectId,
+  onSelectProjectId,
   workspaceToken,
   providerStatuses,
   onSaveProjectHtml,
   onCreateProjectWithHtml,
 }) => {
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(projects[0]?.id || '');
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(
+    activeProjectId || projects[0]?.id || ''
+  );
   const selectedProject = projects.find((p) => p.id === selectedProjectId) || projects[0];
 
   const [newProjectName, setNewProjectName] = useState('');
@@ -81,6 +87,8 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
   const [generating, setGenerating] = useState(false);
   const [refining, setRefining] = useState(false);
   const [auditing, setAuditing] = useState(false);
+  const [savingHtml, setSavingHtml] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   const [auditResult, setAuditResult] = useState<{
     summary: string;
     checks: Array<{ label: string; passed: boolean; advice: string }>;
@@ -100,6 +108,12 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
 
   const githubConnected = providerStatuses.find((p) => p.provider === 'github')?.connected;
   const netlifyConnected = providerStatuses.find((p) => p.provider === 'netlify')?.connected;
+
+  useEffect(() => {
+    if (activeProjectId && projects.some((p) => p.id === activeProjectId)) {
+      setSelectedProjectId(activeProjectId);
+    }
+  }, [activeProjectId, projects]);
 
   useEffect(() => {
     if (projects.length > 0 && !projects.some((p) => p.id === selectedProjectId)) {
@@ -239,17 +253,35 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
   };
 
   const handleSaveManualEdits = async () => {
-    if (!selectedProject) return;
-    await onSaveProjectHtml(selectedProject.id, htmlCode);
-    setFeedback({ type: 'ok', text: 'Modifications manuelles enregistrées.' });
+    if (!selectedProject || savingHtml) return;
+    setSavingHtml(true);
+    setFeedback(null);
+    try {
+      await onSaveProjectHtml(selectedProject.id, htmlCode);
+      setFeedback({ type: 'ok', text: 'Modifications manuelles enregistrées.' });
+    } catch (err: any) {
+      setFeedback({ type: 'err', text: err?.message || 'Impossible d’enregistrer les modifications.' });
+    } finally {
+      setSavingHtml(false);
+    }
   };
 
   const handleCreateProjectFromStudio = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newProjectName.trim() || !htmlCode) return;
-    await onCreateProjectWithHtml(newProjectName.trim(), htmlCode);
-    setNewProjectName('');
-    setFeedback({ type: 'ok', text: 'Nouveau projet créé avec ce site !' });
+    if (!newProjectName.trim() || !htmlCode || creatingProject) return;
+    setCreatingProject(true);
+    setFeedback(null);
+    try {
+      const created = await onCreateProjectWithHtml(newProjectName.trim(), htmlCode);
+      setSelectedProjectId(created.id);
+      onSelectProjectId?.(created.id);
+      setNewProjectName('');
+      setFeedback({ type: 'ok', text: `Projet "${created.clientName}" créé avec ce site !` });
+    } catch (err: any) {
+      setFeedback({ type: 'err', text: err?.message || 'Impossible de créer le projet.' });
+    } finally {
+      setCreatingProject(false);
+    }
   };
 
   const handleDownloadHtml = () => {
@@ -332,7 +364,10 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
             {projects.length > 0 && (
               <select
                 value={selectedProject?.id || ''}
-                onChange={(e) => setSelectedProjectId(e.target.value)}
+                onChange={(e) => {
+                  setSelectedProjectId(e.target.value);
+                  onSelectProjectId?.(e.target.value);
+                }}
                 className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800"
                 aria-label="Sélectionner un projet"
               >
@@ -488,11 +523,11 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
                 <button
                   type="button"
                   onClick={handleSaveManualEdits}
-                  disabled={!htmlCode}
+                  disabled={!htmlCode || savingHtml}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0"
                 >
                   <Save className="h-3.5 w-3.5" />
-                  <span>Enregistrer</span>
+                  <span>{savingHtml ? 'Sauvegarde...' : 'Enregistrer'}</span>
                 </button>
               )}
               <button
@@ -561,9 +596,10 @@ export const AiStudioView: React.FC<AiStudioViewProps> = ({
               />
               <button
                 type="submit"
-                className="w-full rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700"
+                disabled={creatingProject || !newProjectName.trim()}
+                className="w-full rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
               >
-                Enregistrer dans Projets
+                {creatingProject ? 'Création...' : 'Enregistrer dans Projets'}
               </button>
             </form>
           )}

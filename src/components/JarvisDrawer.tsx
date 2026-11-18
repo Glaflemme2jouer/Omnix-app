@@ -15,6 +15,7 @@ interface JarvisDrawerProps {
   onClose: () => void;
   state: AgencyState;
   user: User | null;
+  gateEmail?: string | null;
   workspaceToken: string | null;
   providerStatuses: ThirdPartyProviderStatus[];
 }
@@ -31,6 +32,7 @@ export const JarvisDrawer: React.FC<JarvisDrawerProps> = ({
   onClose,
   state,
   user,
+  gateEmail,
   workspaceToken,
   providerStatuses,
 }) => {
@@ -118,7 +120,7 @@ export const JarvisDrawer: React.FC<JarvisDrawerProps> = ({
         body: JSON.stringify({
           messages: nextHistory.map((m) => ({ role: m.role, text: m.text })),
           workspaceUserName: user?.displayName || undefined,
-          workspaceUserEmail: user?.email || undefined,
+          workspaceUserEmail: user?.email || gateEmail || undefined,
         }),
       });
       const data = await res.json();

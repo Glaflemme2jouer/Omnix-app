@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 import { Sidebar, type NavSection } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
@@ -10,7 +10,7 @@ import { CalendarView } from './components/views/CalendarView';
 import { ProspectsOutreachView } from './components/views/ProspectsOutreachView';
 import { IntegrationsHubView } from './components/views/IntegrationsHubView';
 import { TeamFinanceView } from './components/views/TeamFinanceView';
-import { ShieldCheck, LogOut, Eye, EyeOff, KeyRound } from 'lucide-react';
+import { ShieldCheck, LogOut, Eye, EyeOff, KeyRound, AlertCircle, X } from 'lucide-react';
 import { GoogleSignInButton } from './components/GoogleSignInButton';
 import { googleSignIn, initAuth, logoutGoogle } from './lib/firebaseAuth';
 import type {
@@ -53,6 +53,10 @@ export default function App() {
   const [state, setState] = useState<AgencyState | null>(null);
   const [loadingState, setLoadingState] = useState(true);
   const [loadError, setLoadError] = useState('');
+  const [actionError, setActionError] = useState('');
+
+  const [selectedProjectId, setSelectedProjectId] = useState<string>('');
+  const [openNewProjectNonce, setOpenNewProjectNonce] = useState(0);
 
   const [user, setUser] = useState<User | null>(null);
   const [workspaceToken, setWorkspaceToken] = useState<string | null>(null);
@@ -64,6 +68,11 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
+
+  const gateCheckedRef = useRef(false);
+  const gateAuthorizedRef = useRef(false);
+  gateCheckedRef.current = gate.checked;
+  gateAuthorizedRef.current = gate.authorized;
 
   const fetchAgencyState = useCallback(async () => {
     try {
@@ -183,12 +192,12 @@ export default function App() {
     [fetchAgencyState, fetchOAuthStatuses]
   );
 
-  // Listen for Google Auth state
+  // Listen for Google Auth state without overwriting an active password session
   useEffect(() => {
     const unsub = initAuth(async (firebaseUser, token) => {
       setUser(firebaseUser);
       setWorkspaceToken(token);
-      if (firebaseUser) {
+      if (firebaseUser && gateCheckedRef.current && !gateAuthorizedRef.current) {
         await establishServerSession(firebaseUser);
       }
     });
@@ -273,151 +282,223 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (!state) return;
+    if (state.projects.length === 0) {
+      if (selectedProjectId) setSelectedProjectId('');
+      return;
+    }
+    if (!selectedProjectId || !state.projects.some((p) => p.id === selectedProjectId)) {
+      setSelectedProjectId(state.projects[0].id);
+    }
+  }, [state, selectedProjectId]);
+
+  const apiJson = useCallback(
+    async <T,>(url: string, options?: RequestInit): Promise<T> => {
+      setActionError('');
+      let res: Response;
+      try {
+        res = await fetch(url, options);
+      } catch {
+        const msg = 'Impossible de joindre le serveur. Vérifiez votre connexion internet.';
+        setActionError(msg);
+        throw new Error(msg);
+      }
+
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 || res.status === 403) {
+        const msg =
+          data?.error ||
+          (res.status === 401
+            ? 'Votre session a expiré. Veuillez vous reconnecter.'
+            : 'Accès refusé pour cette action.');
+        if (res.status === 401) {
+          setGateError(msg);
+          await refreshGateAndData();
+        } else {
+          setActionError(msg);
+        }
+        throw new Error(msg);
+      }
+
+      if (!res.ok) {
+        const msg = data?.error || data?.message || `Erreur serveur (${res.status}).`;
+        setActionError(msg);
+        throw new Error(msg);
+      }
+
+      return data as T;
+    },
+    [refreshGateAndData]
+  );
+
   // --- Agency Mutations ---
   const handleToggleChecklist = async (id: string, completed: boolean) => {
-    const res = await fetch(`/api/agency/checklist/${id}`, {
+    const next = await apiJson<AgencyState>(`/api/agency/checklist/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ completed }),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
   };
 
   const handleToggleRoadmapTask = async (weekId: string, taskId: string, completed: boolean) => {
-    const res = await fetch(`/api/agency/roadmap/${weekId}/tasks/${taskId}`, {
+    const next = await apiJson<AgencyState>(`/api/agency/roadmap/${weekId}/tasks/${taskId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ completed }),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
   };
 
-  const handleCreateProject = async (payload: Partial<ClientProject>) => {
-    const res = await fetch('/api/agency/projects', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setState(data.state);
-    }
+  const handleCreateProject = async (payload: Partial<ClientProject>): Promise<ClientProject> => {
+    const data = await apiJson<{ project: ClientProject; state: AgencyState }>(
+      '/api/agency/projects',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    setState(data.state);
+    setSelectedProjectId(data.project.id);
+    return data.project;
   };
 
-  const handleUpdateProject = async (id: string, updates: Partial<ClientProject>) => {
-    const res = await fetch(`/api/agency/projects/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updates),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setState(data.state);
-    }
+  const handleUpdateProject = async (id: string, updates: Partial<ClientProject>): Promise<ClientProject> => {
+    const data = await apiJson<{ project: ClientProject; state: AgencyState }>(
+      `/api/agency/projects/${id}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      }
+    );
+    setState(data.state);
+    return data.project;
   };
 
   const handleDeleteProject = async (id: string) => {
-    const res = await fetch(`/api/agency/projects/${id}`, { method: 'DELETE' });
-    if (res.ok) setState(await res.json());
+    const next = await apiJson<AgencyState>(`/api/agency/projects/${id}`, { method: 'DELETE' });
+    setState(next);
   };
 
   const handleCreateTask = async (payload: Partial<KanbanTask>) => {
-    const res = await fetch('/api/agency/tasks', {
+    const next = await apiJson<AgencyState>('/api/agency/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
   };
 
   const handleUpdateTask = async (id: string, updates: Partial<KanbanTask>) => {
-    const res = await fetch(`/api/agency/tasks/${id}`, {
+    const next = await apiJson<AgencyState>(`/api/agency/tasks/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
   };
 
   const handleDeleteTask = async (id: string) => {
-    const res = await fetch(`/api/agency/tasks/${id}`, { method: 'DELETE' });
-    if (res.ok) setState(await res.json());
+    const next = await apiJson<AgencyState>(`/api/agency/tasks/${id}`, { method: 'DELETE' });
+    setState(next);
   };
 
   const handleCreateAppointment = async (payload: Partial<AgencyAppointment>) => {
-    const res = await fetch('/api/agency/appointments', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setState(data.state);
-    }
+    const data = await apiJson<{ appointment: AgencyAppointment; state: AgencyState }>(
+      '/api/agency/appointments',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    setState(data.state);
   };
 
   const handleDeleteAppointment = async (id: string) => {
-    const res = await fetch(`/api/agency/appointments/${id}`, { method: 'DELETE' });
-    if (res.ok) setState(await res.json());
+    const next = await apiJson<AgencyState>(`/api/agency/appointments/${id}`, { method: 'DELETE' });
+    setState(next);
   };
 
   const handleCreateProspect = async (payload: Partial<Prospect>) => {
-    const res = await fetch('/api/agency/prospects', {
+    const next = await apiJson<AgencyState>('/api/agency/prospects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
   };
 
   const handleUpdateProspect = async (id: string, updates: Partial<Prospect>) => {
-    const res = await fetch(`/api/agency/prospects/${id}`, {
+    const next = await apiJson<AgencyState>(`/api/agency/prospects/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
   };
 
   const handleDeleteProspect = async (id: string) => {
-    const res = await fetch(`/api/agency/prospects/${id}`, { method: 'DELETE' });
-    if (res.ok) setState(await res.json());
+    const next = await apiJson<AgencyState>(`/api/agency/prospects/${id}`, { method: 'DELETE' });
+    setState(next);
   };
 
   const handleUpdateMember = async (id: string, updates: Partial<TeamMember>) => {
-    const res = await fetch(`/api/agency/members/${id}`, {
+    const next = await apiJson<AgencyState>(`/api/agency/members/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
   };
 
   const handleAddMember = async (payload: Partial<TeamMember>) => {
-    const res = await fetch('/api/agency/members', {
+    const next = await apiJson<AgencyState>('/api/agency/members', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
+  };
+
+  const handleDeleteMember = async (id: string) => {
+    const next = await apiJson<AgencyState>(`/api/agency/members/${id}`, { method: 'DELETE' });
+    setState(next);
   };
 
   const handleAddFinance = async (payload: Partial<FinanceEntry>) => {
-    const res = await fetch('/api/agency/finances', {
+    const next = await apiJson<AgencyState>('/api/agency/finances', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
   };
 
-  const handleUpdateSettings = async (updates: Partial<AgencyState['settings']>) => {
-    const res = await fetch('/api/agency/settings', {
+  const handleUpdateFinance = async (id: string, updates: Partial<FinanceEntry>) => {
+    const next = await apiJson<AgencyState>(`/api/agency/finances/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
     });
-    if (res.ok) setState(await res.json());
+    setState(next);
+  };
+
+  const handleDeleteFinance = async (id: string) => {
+    const next = await apiJson<AgencyState>(`/api/agency/finances/${id}`, { method: 'DELETE' });
+    setState(next);
+  };
+
+  const handleUpdateSettings = async (updates: Partial<AgencyState['settings']>) => {
+    const next = await apiJson<AgencyState>('/api/agency/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    setState(next);
   };
 
   if (!gate.checked || (gate.authorized && loadingState)) {
@@ -621,6 +702,23 @@ export default function App() {
         />
 
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1440px] w-full mx-auto">
+          {actionError && (
+            <div className="mb-5 flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-800">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 text-red-600" />
+                <span>{actionError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActionError('')}
+                className="rounded p-1 text-red-500 hover:bg-red-100 hover:text-red-700"
+                aria-label="Fermer l’alerte"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
           {activeSection === 'overview' && (
             <OverviewView
               state={state}
@@ -630,19 +728,33 @@ export default function App() {
               onToggleRoadmapTask={handleToggleRoadmapTask}
               onUpdateSettings={handleUpdateSettings}
               onNavigate={setActiveSection}
+              onOpenNewProject={() => {
+                setOpenNewProjectNonce((n) => n + 1);
+                setActiveSection('projects');
+              }}
+              onOpenProject={(projId) => {
+                setSelectedProjectId(projId);
+                setActiveSection('projects');
+              }}
+              onOpenAiStudio={(projId) => {
+                if (projId) setSelectedProjectId(projId);
+                setActiveSection('ai-studio');
+              }}
             />
           )}
 
           {activeSection === 'ai-studio' && (
             <AiStudioView
               projects={state.projects}
+              activeProjectId={selectedProjectId}
+              onSelectProjectId={setSelectedProjectId}
               workspaceToken={workspaceToken}
               providerStatuses={providerStatuses}
               onSaveProjectHtml={async (projectId, html) => {
                 await handleUpdateProject(projectId, { generatedHtml: html });
               }}
               onCreateProjectWithHtml={async (clientName, html) => {
-                await handleCreateProject({
+                return handleCreateProject({
                   clientName,
                   generatedHtml: html,
                   isDemo: true,
@@ -655,13 +767,20 @@ export default function App() {
           {activeSection === 'projects' && (
             <ProjectsView
               state={state}
+              selectedProjectId={selectedProjectId}
+              onSelectProjectId={setSelectedProjectId}
+              openNewProjectNonce={openNewProjectNonce}
               onCreateProject={handleCreateProject}
               onUpdateProject={handleUpdateProject}
               onDeleteProject={handleDeleteProject}
               onCreateTask={handleCreateTask}
               onUpdateTask={handleUpdateTask}
               onDeleteTask={handleDeleteTask}
-              onOpenAiStudio={() => setActiveSection('ai-studio')}
+              onAddFinance={handleAddFinance}
+              onOpenAiStudio={(projId) => {
+                if (projId) setSelectedProjectId(projId);
+                setActiveSection('ai-studio');
+              }}
             />
           )}
 
@@ -686,6 +805,22 @@ export default function App() {
               onSaveDefaultFormId={(formId) =>
                 handleUpdateSettings({ defaultGoogleFormId: formId })
               }
+              onConvertToProject={async (prospect) => {
+                const created = await handleCreateProject({
+                  clientName: prospect.businessName,
+                  sector: prospect.category,
+                  contactEmail: prospect.contactEmail,
+                  contactPhone: prospect.phone,
+                  isDemo: false,
+                  step: 1,
+                  notes: prospect.notes
+                    ? `Issu de prospection (${prospect.cityArea}). ${prospect.notes}`
+                    : `Issu de prospection (${prospect.cityArea}).`,
+                });
+                await handleUpdateProspect(prospect.id, { status: 'Gagné' });
+                setSelectedProjectId(created.id);
+                setActiveSection('projects');
+              }}
             />
           )}
 
@@ -706,7 +841,10 @@ export default function App() {
               currentUserEmail={gate.email || user?.email || ''}
               onUpdateMember={handleUpdateMember}
               onAddMember={handleAddMember}
+              onDeleteMember={handleDeleteMember}
               onAddFinance={handleAddFinance}
+              onUpdateFinance={handleUpdateFinance}
+              onDeleteFinance={handleDeleteFinance}
               onUpdateSettings={handleUpdateSettings}
               onStateReplaced={(nextState) => setState(nextState)}
             />
@@ -719,6 +857,7 @@ export default function App() {
         onClose={() => setJarvisOpen(false)}
         state={state}
         user={user}
+        gateEmail={gate.email}
         workspaceToken={workspaceToken}
         providerStatuses={providerStatuses}
       />

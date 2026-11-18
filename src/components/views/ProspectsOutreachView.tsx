@@ -8,6 +8,7 @@ import {
   ClipboardList,
   RefreshCw,
   Target,
+  FolderPlus,
 } from 'lucide-react';
 import type { AgencyState, Prospect } from '../../types';
 import {
@@ -28,6 +29,7 @@ interface ProspectsOutreachViewProps {
   onUpdateProspect: (id: string, updates: Partial<Prospect>) => Promise<void>;
   onDeleteProspect: (id: string) => Promise<void>;
   onSaveDefaultFormId: (formId: string) => Promise<void>;
+  onConvertToProject: (prospect: Prospect) => Promise<void>;
 }
 
 const DEFAULT_TEMPLATE = `Bonjour, nous sommes une équipe de lycéens de la ville. Nous construisons des sites web pour les commerces et les associations. Nous avons remarqué que votre activité n'a pas de site. Voici un exemple de notre travail : [lien de votre démo]. Pouvez-vous nous accorder 15 minutes cette semaine ? Nous vous montrons une maquette gratuite.`;
@@ -40,14 +42,20 @@ export const ProspectsOutreachView: React.FC<ProspectsOutreachViewProps> = ({
   onUpdateProspect,
   onDeleteProspect,
   onSaveDefaultFormId,
+  onConvertToProject,
 }) => {
   const [subTab, setSubTab] = useState<'prospects' | 'gmail' | 'forms'>('prospects');
 
   const [businessName, setBusinessName] = useState('');
   const [category, setCategory] = useState<Prospect['category']>('Commerce');
+  const [currentSiteStatus, setCurrentSiteStatus] =
+    useState<Prospect['currentSiteStatus']>('Aucun site');
   const [cityArea, setCityArea] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [phone, setPhone] = useState('');
+  const [addingProspect, setAddingProspect] = useState(false);
+  const [prospectError, setProspectError] = useState('');
+  const [convertingId, setConvertingId] = useState<string | null>(null);
 
   const [gmailTo, setGmailTo] = useState('');
   const [gmailSubject, setGmailSubject] = useState('Proposition de maquette gratuite — Omnix');
@@ -85,18 +93,27 @@ export const ProspectsOutreachView: React.FC<ProspectsOutreachViewProps> = ({
 
   const handleAddProspect = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!businessName.trim()) return;
-    await onCreateProspect({
-      businessName: businessName.trim(),
-      category,
-      cityArea: cityArea.trim() || state.settings.city || 'Ville',
-      contactEmail: contactEmail.trim(),
-      phone: phone.trim(),
-    });
-    setBusinessName('');
-    setCityArea('');
-    setContactEmail('');
-    setPhone('');
+    if (!businessName.trim() || addingProspect) return;
+    setAddingProspect(true);
+    setProspectError('');
+    try {
+      await onCreateProspect({
+        businessName: businessName.trim(),
+        category,
+        currentSiteStatus,
+        cityArea: cityArea.trim() || state.settings.city || 'Ville',
+        contactEmail: contactEmail.trim(),
+        phone: phone.trim(),
+      });
+      setBusinessName('');
+      setCityArea('');
+      setContactEmail('');
+      setPhone('');
+    } catch (err: any) {
+      setProspectError(err?.message || 'Impossible d’ajouter le prospect.');
+    } finally {
+      setAddingProspect(false);
+    }
   };
 
   const handlePrepareEmailForProspect = (p: Prospect) => {
@@ -213,59 +230,89 @@ export const ProspectsOutreachView: React.FC<ProspectsOutreachViewProps> = ({
         <div className="space-y-6">
           <form
             onSubmit={handleAddProspect}
-            className="rounded-xl border border-slate-200/90 bg-white p-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6 items-end"
+            className="rounded-xl border border-slate-200/90 bg-white p-5 space-y-3"
           >
-            <div className="lg:col-span-2">
-              <label className="block text-xs font-medium text-slate-700 mb-1">Commerce / Club</label>
-              <input
-                type="text"
-                required
-                value={businessName}
-                onChange={(e) => setBusinessName(e.target.value)}
-                placeholder="Ex : Boulangerie, Club de foot..."
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Catégorie</label>
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value as Prospect['category'])}
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs"
+            {prospectError && (
+              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                {prospectError}
+              </div>
+            )}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-7 items-end">
+              <div className="lg:col-span-2">
+                <label className="block text-xs font-medium text-slate-700 mb-1">Commerce / Club *</label>
+                <input
+                  type="text"
+                  required
+                  value={businessName}
+                  onChange={(e) => setBusinessName(e.target.value)}
+                  placeholder="Ex : Boulangerie, Club de foot..."
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Catégorie</label>
+                <select
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value as Prospect['category'])}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs"
+                >
+                  <option value="Commerce">Commerce</option>
+                  <option value="Club / Association">Club / Association</option>
+                  <option value="Artisan / Indépendant">Artisan / Indépendant</option>
+                  <option value="Entourage">Entourage</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Site actuel</label>
+                <select
+                  value={currentSiteStatus}
+                  onChange={(e) =>
+                    setCurrentSiteStatus(e.target.value as Prospect['currentSiteStatus'])
+                  }
+                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs"
+                >
+                  <option value="Aucun site">Aucun site</option>
+                  <option value="Site ancien / non mobile">Site ancien / non mobile</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Quartier</label>
+                <input
+                  type="text"
+                  value={cityArea}
+                  onChange={(e) => setCityArea(e.target.value)}
+                  placeholder="Centre-ville"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">E-mail & Téléphone</label>
+                <div className="space-y-1.5">
+                  <input
+                    type="email"
+                    value={contactEmail}
+                    onChange={(e) => setContactEmail(e.target.value)}
+                    placeholder="contact@..."
+                    className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs"
+                  />
+                  <input
+                    type="tel"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="06..."
+                    className="w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs"
+                  />
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={addingProspect || !businessName.trim()}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60 whitespace-nowrap shrink-0"
               >
-                <option value="Commerce">Commerce</option>
-                <option value="Club / Association">Club / Association</option>
-                <option value="Artisan / Indépendant">Artisan / Indépendant</option>
-                <option value="Entourage">Entourage</option>
-              </select>
+                <Plus className="h-3.5 w-3.5" />
+                <span>{addingProspect ? 'Ajout...' : 'Ajouter'}</span>
+              </button>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Quartier</label>
-              <input
-                type="text"
-                value={cityArea}
-                onChange={(e) => setCityArea(e.target.value)}
-                placeholder="Centre-ville"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">E-mail</label>
-              <input
-                type="email"
-                value={contactEmail}
-                onChange={(e) => setContactEmail(e.target.value)}
-                placeholder="contact@..."
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs"
-              />
-            </div>
-            <button
-              type="submit"
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 whitespace-nowrap shrink-0"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Ajouter</span>
-            </button>
           </form>
 
           {state.prospects.length === 0 ? (
@@ -323,6 +370,25 @@ export const ProspectsOutreachView: React.FC<ProspectsOutreachViewProps> = ({
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={convertingId === p.id}
+                            onClick={async () => {
+                              setConvertingId(p.id);
+                              try {
+                                await onConvertToProject(p);
+                              } catch (err: any) {
+                                setProspectError(err?.message || 'Conversion en projet impossible.');
+                              } finally {
+                                setConvertingId(null);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50 whitespace-nowrap shrink-0"
+                            title="Créer un dossier projet depuis ce prospect"
+                          >
+                            <FolderPlus className="h-3 w-3" />
+                            <span>{convertingId === p.id ? '...' : 'Créer projet'}</span>
+                          </button>
                           <button
                             type="button"
                             onClick={() => handlePrepareEmailForProspect(p)}

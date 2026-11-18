@@ -13,6 +13,7 @@ import {
   Plus,
   Pencil,
   Check,
+  X,
 } from 'lucide-react';
 import type { AgencyState, ThirdPartyProviderStatus } from '../../types';
 import type { NavSection } from '../Sidebar';
@@ -21,10 +22,13 @@ interface OverviewViewProps {
   state: AgencyState;
   hasWorkspaceToken: boolean;
   providerStatuses: ThirdPartyProviderStatus[];
-  onToggleChecklist: (id: string, completed: boolean) => void;
-  onToggleRoadmapTask: (weekId: string, taskId: string, completed: boolean) => void;
+  onToggleChecklist: (id: string, completed: boolean) => Promise<void>;
+  onToggleRoadmapTask: (weekId: string, taskId: string, completed: boolean) => Promise<void>;
   onUpdateSettings: (updates: Partial<AgencyState['settings']>) => Promise<void>;
   onNavigate: (section: NavSection) => void;
+  onOpenNewProject: () => void;
+  onOpenProject: (projectId: string) => void;
+  onOpenAiStudio: (projectId?: string) => void;
 }
 
 const STEP_NAMES: Record<number, string> = {
@@ -45,8 +49,12 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   onToggleRoadmapTask,
   onUpdateSettings,
   onNavigate,
+  onOpenNewProject,
+  onOpenProject,
+  onOpenAiStudio,
 }) => {
   const [editingIdentity, setEditingIdentity] = useState(false);
+  const [savingIdentity, setSavingIdentity] = useState(false);
   const [nameInput, setNameInput] = useState(state.settings.agencyName);
   const [cityInput, setCityInput] = useState(state.settings.city);
 
@@ -55,7 +63,10 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   const totalRevenue = state.finances
     .filter((f) => f.status === 'Payé' && f.type !== 'Dépense caisse commune')
     .reduce((sum, f) => sum + f.amountEur, 0);
-  const commonPot = Math.round(totalRevenue * 0.2);
+  const expenses = state.finances
+    .filter((f) => f.type === 'Dépense caisse commune')
+    .reduce((sum, f) => sum + f.amountEur, 0);
+  const commonPot = Math.max(0, Math.round((totalRevenue * 0.2 - expenses) * 100) / 100);
 
   const checklistDone = state.preSaleChecklist.filter((c) => c.completed).length;
   const upcomingAppointments = [...state.appointments]
@@ -63,16 +74,23 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
     .slice(0, 4);
 
   const connected3p = providerStatuses.filter((p) => p.connected).length;
-  const totalConnected = (hasWorkspaceToken ? 1 : 0) + 1 + Math.max(connected3p, 4);
+  const totalConnected = (hasWorkspaceToken ? 1 : 0) + 1 + connected3p;
 
   const handleSaveIdentity = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!nameInput.trim()) return;
-    await onUpdateSettings({
-      agencyName: nameInput.trim(),
-      city: cityInput.trim(),
-    });
-    setEditingIdentity(false);
+    if (!nameInput.trim() || savingIdentity) return;
+    setSavingIdentity(true);
+    try {
+      await onUpdateSettings({
+        agencyName: nameInput.trim(),
+        city: cityInput.trim(),
+      });
+      setEditingIdentity(false);
+    } catch {
+      // Error surfaced by App banner
+    } finally {
+      setSavingIdentity(false);
+    }
   };
 
   return (
@@ -98,10 +116,19 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
               />
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
+                disabled={savingIdentity}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
               >
                 <Check className="h-3.5 w-3.5" />
-                <span>Valider</span>
+                <span>{savingIdentity ? 'Validation...' : 'Valider'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditingIdentity(false)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+              >
+                <X className="h-3.5 w-3.5" />
+                <span>Annuler</span>
               </button>
             </form>
           ) : (
@@ -131,7 +158,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
         <div className="flex flex-wrap items-center gap-3 shrink-0">
           <button
             type="button"
-            onClick={() => onNavigate('ai-studio')}
+            onClick={() => onOpenAiStudio()}
             className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-medium text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
           >
             <Sparkles className="h-4 w-4" />
@@ -139,7 +166,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => onNavigate('projects')}
+            onClick={onOpenNewProject}
             className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
           >
             <Plus className="h-4 w-4" />
@@ -244,7 +271,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
               </p>
               <button
                 type="button"
-                onClick={() => onNavigate('projects')}
+                onClick={onOpenNewProject}
                 className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800"
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -262,9 +289,13 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                     className="py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0">
-                      <div className="text-sm font-semibold text-slate-900 truncate">
+                      <button
+                        type="button"
+                        onClick={() => onOpenProject(project.id)}
+                        className="text-sm font-semibold text-slate-900 hover:text-blue-600 truncate block text-left"
+                      >
                         {project.clientName}
-                      </div>
+                      </button>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                         <span>{project.sector}</span>
                         <span aria-hidden="true">·</span>
@@ -293,7 +324,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                       </div>
                       <button
                         type="button"
-                        onClick={() => onNavigate('ai-studio')}
+                        onClick={() => onOpenAiStudio(project.id)}
                         className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
                       >
                         Studio IA

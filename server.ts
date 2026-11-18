@@ -118,18 +118,27 @@ async function verifyFirebaseIdToken(
   };
 }
 
-function setAuthCookie(res: Response, email: string): void {
-  const signed = signAuthCookie(email);
-  res.cookie(AUTH_COOKIE, signed, {
+function getCookieOptions(req: Request, maxAge?: number) {
+  const isHttps =
+    req.secure ||
+    String(req.headers['x-forwarded-proto'] || '')
+      .split(',')[0]
+      .trim() === 'https';
+  return {
     httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    maxAge: 30 * 24 * 60 * 60 * 1000,
-  });
+    secure: isHttps,
+    sameSite: (isHttps ? 'none' : 'lax') as 'none' | 'lax',
+    ...(maxAge !== undefined ? { maxAge } : {}),
+  };
 }
 
-function clearAuthCookie(res: Response): void {
-  res.clearCookie(AUTH_COOKIE, { httpOnly: true, secure: true, sameSite: 'none' });
+function setAuthCookie(req: Request, res: Response, email: string): void {
+  const signed = signAuthCookie(email);
+  res.cookie(AUTH_COOKIE, signed, getCookieOptions(req, 30 * 24 * 60 * 60 * 1000));
+}
+
+function clearAuthCookie(req: Request, res: Response): void {
+  res.clearCookie(AUTH_COOKIE, getCookieOptions(req));
 }
 
 function ensureMemberInState(
@@ -207,12 +216,7 @@ function getOrCreateSessionId(req: Request, res: Response): string {
   let sid = req.cookies?.[SESSION_COOKIE];
   if (!sid || typeof sid !== 'string') {
     sid = crypto.randomBytes(24).toString('hex');
-    res.cookie(SESSION_COOKIE, sid, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'none',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-    });
+    res.cookie(SESSION_COOKIE, sid, getCookieOptions(req, 30 * 24 * 60 * 60 * 1000));
   }
   if (!sessionStore.has(sid)) {
     sessionStore.set(sid, {});
@@ -280,6 +284,7 @@ function extractHtmlDocument(rawText: string): string {
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '4mb' }));
   app.use(cookieParser());
 
@@ -337,7 +342,7 @@ async function startServer() {
     });
     saveAgencyState(state);
 
-    setAuthCookie(res, cleanEmail);
+    setAuthCookie(req, res, cleanEmail);
     res.json({
       authorized: true,
       email: cleanEmail,
@@ -362,7 +367,7 @@ async function startServer() {
     }
 
     if (state.settings.lockEnabled && !state.settings.allowedEmails.includes(cleanEmail)) {
-      clearAuthCookie(res);
+      clearAuthCookie(req, res);
       res.status(403).json({
         error: `Accès refusé pour ${cleanEmail}. Cet e-mail n’est pas dans la liste autorisée d’${state.settings.agencyName}.`,
         code: 'NOT_ALLOWLISTED',
@@ -388,7 +393,7 @@ async function startServer() {
       saveAgencyState(state);
     }
 
-    setAuthCookie(res, cleanEmail);
+    setAuthCookie(req, res, cleanEmail);
     res.json({
       authorized: true,
       email: cleanEmail,
@@ -415,7 +420,7 @@ async function startServer() {
       }
 
       if (state.settings.lockEnabled && !state.settings.allowedEmails.includes(verified.email)) {
-        clearAuthCookie(res);
+        clearAuthCookie(req, res);
         res.status(403).json({
           error: `Accès refusé pour ${verified.email}. Cet e-mail n’est pas dans la liste autorisée d’${state.settings.agencyName}.`,
           code: 'NOT_ALLOWLISTED',
@@ -424,7 +429,7 @@ async function startServer() {
         return;
       }
 
-      setAuthCookie(res, verified.email);
+      setAuthCookie(req, res, verified.email);
 
       res.json({
         authorized: true,
@@ -436,8 +441,8 @@ async function startServer() {
     }
   });
 
-  app.post('/api/auth/logout', (_req, res) => {
-    clearAuthCookie(res);
+  app.post('/api/auth/logout', (req, res) => {
+    clearAuthCookie(req, res);
     res.json({ ok: true });
   });
 
@@ -696,20 +701,33 @@ async function startServer() {
     res.json(state);
   });
 
+  app.delete('/api/agency/members/:id', (req, res) => {
+    const state = loadAgencyState();
+    state.members = state.members.filter((m) => m.id !== req.params.id);
+    saveAgencyState(state);
+    res.json(state);
+  });
+
   app.post('/api/agency/projects', (req, res) => {
     const state = loadAgencyState();
     const body = req.body as Partial<ClientProject>;
     const project: ClientProject = {
       id: `proj-${Date.now()}`,
-      clientName: body.clientName || 'Nouveau client',
-      sector: body.sector || 'Commerce local',
+      clientName: (body.clientName || '').trim() || 'Nouveau client',
+      sector: (body.sector || '').trim() || 'Commerce local',
       isDemo: Boolean(body.isDemo),
       step: body.step || 1,
       offerTier: body.offerTier || 'Standard',
-      totalPriceEur: Number(body.totalPriceEur) || 350,
+      totalPriceEur:
+        body.totalPriceEur !== undefined && !Number.isNaN(Number(body.totalPriceEur))
+          ? Number(body.totalPriceEur)
+          : 380,
       depositPaidEur: Number(body.depositPaidEur) || 0,
       balancePaidEur: Number(body.balancePaidEur) || 0,
-      revisionsIncluded: Number(body.revisionsIncluded) || 2,
+      revisionsIncluded:
+        body.revisionsIncluded !== undefined && !Number.isNaN(Number(body.revisionsIncluded))
+          ? Number(body.revisionsIncluded)
+          : 2,
       deliveryTargetDate:
         body.deliveryTargetDate || new Date(Date.now() + 9 * 86400000).toISOString().slice(0, 10),
       ownerMemberId: body.ownerMemberId || state.members[0]?.id || '',
@@ -734,8 +752,8 @@ async function startServer() {
       },
       integrations: body.integrations || {},
       generatedHtml: body.generatedHtml || '',
-      followUp30Done: false,
-      googleReviewRequested: false,
+      followUp30Done: Boolean(body.followUp30Done),
+      googleReviewRequested: Boolean(body.googleReviewRequested),
       notes: body.notes || '',
       updatedAt: new Date().toISOString(),
     };
@@ -884,6 +902,25 @@ async function startServer() {
       date: req.body.date || new Date().toISOString().slice(0, 10),
     };
     state.finances.unshift(entry);
+    saveAgencyState(state);
+    res.json(state);
+  });
+
+  app.put('/api/agency/finances/:id', (req, res) => {
+    const state = loadAgencyState();
+    const idx = state.finances.findIndex((f) => f.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Écriture introuvable.' });
+      return;
+    }
+    state.finances[idx] = { ...state.finances[idx], ...req.body, id: req.params.id };
+    saveAgencyState(state);
+    res.json(state);
+  });
+
+  app.delete('/api/agency/finances/:id', (req, res) => {
+    const state = loadAgencyState();
+    state.finances = state.finances.filter((f) => f.id !== req.params.id);
     saveAgencyState(state);
     res.json(state);
   });

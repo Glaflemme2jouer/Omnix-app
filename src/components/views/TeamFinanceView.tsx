@@ -34,7 +34,10 @@ interface TeamFinanceViewProps {
   currentUserEmail: string;
   onUpdateMember: (id: string, updates: Partial<TeamMember>) => Promise<void>;
   onAddMember: (payload: Partial<TeamMember>) => Promise<void>;
+  onDeleteMember: (id: string) => Promise<void>;
   onAddFinance: (payload: Partial<FinanceEntry>) => Promise<void>;
+  onUpdateFinance: (id: string, updates: Partial<FinanceEntry>) => Promise<void>;
+  onDeleteFinance: (id: string) => Promise<void>;
   onUpdateSettings: (updates: Partial<AgencyState['settings']>) => Promise<void>;
   onStateReplaced: (nextState: AgencyState) => void;
 }
@@ -62,16 +65,28 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
   currentUserEmail,
   onUpdateMember,
   onAddMember,
+  onDeleteMember,
   onAddFinance,
+  onUpdateFinance,
+  onDeleteFinance,
   onUpdateSettings,
   onStateReplaced,
 }) => {
   const [newMemberName, setNewMemberName] = useState('');
   const [newMemberRole, setNewMemberRole] = useState<AgencyRole>('Chef de projet');
+  const [addingMember, setAddingMember] = useState(false);
 
   const [finClient, setFinClient] = useState('');
   const [finAmount, setFinAmount] = useState(150);
   const [finType, setFinType] = useState<FinanceEntry['type']>('Acompte 30 %');
+  const [finStatus, setFinStatus] = useState<FinanceEntry['status']>('Payé');
+  const [finProjectId, setFinProjectId] = useState('');
+  const [addingFinance, setAddingFinance] = useState(false);
+
+  const [teamFinanceFeedback, setTeamFinanceFeedback] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
 
   const [inviteEmail, setInviteEmail] = useState('');
   const [invitePassword, setInvitePassword] = useState('');
@@ -322,23 +337,52 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
 
   const handleAddTeamMember = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMemberName.trim()) return;
-    await onAddMember({ name: newMemberName.trim(), role: newMemberRole });
-    setNewMemberName('');
+    if (!newMemberName.trim() || addingMember) return;
+    setAddingMember(true);
+    setTeamFinanceFeedback(null);
+    try {
+      await onAddMember({ name: newMemberName.trim(), role: newMemberRole });
+      setNewMemberName('');
+      setTeamFinanceFeedback({ type: 'ok', text: 'Membre ajouté à l’équipe.' });
+    } catch (err: any) {
+      setTeamFinanceFeedback({
+        type: 'err',
+        text: err?.message || 'Impossible d’ajouter ce membre.',
+      });
+    } finally {
+      setAddingMember(false);
+    }
   };
 
   const handleAddFinanceEntry = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!finClient.trim()) return;
-    await onAddFinance({
-      clientName: finClient.trim(),
-      label: `${finType} — ${finClient.trim()}`,
-      amountEur: finAmount,
-      type: finType,
-      status: 'Payé',
-      billingParentOrEntity: state.settings.billingFramework,
-    });
-    setFinClient('');
+    const linkedProject = state.projects.find((p) => p.id === finProjectId);
+    const clientLabel = finClient.trim() || linkedProject?.clientName || '';
+    if (!clientLabel || addingFinance) return;
+    setAddingFinance(true);
+    setTeamFinanceFeedback(null);
+    try {
+      await onAddFinance({
+        projectId: finProjectId || '',
+        clientName: clientLabel,
+        label: `${finType} — ${clientLabel}`,
+        amountEur: finAmount,
+        type: finType,
+        status: finStatus,
+        billingParentOrEntity: state.settings.billingFramework,
+        commercialMemberId: linkedProject?.commercialMemberId || undefined,
+      });
+      setFinClient('');
+      setFinProjectId('');
+      setTeamFinanceFeedback({ type: 'ok', text: 'Écriture enregistrée.' });
+    } catch (err: any) {
+      setTeamFinanceFeedback({
+        type: 'err',
+        text: err?.message || 'Impossible d’enregistrer cette écriture.',
+      });
+    } finally {
+      setAddingFinance(false);
+    }
   };
 
   return (
@@ -692,7 +736,7 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
             </p>
           </div>
 
-          <form onSubmit={handleAddTeamMember} className="flex items-center gap-2">
+          <form onSubmit={handleAddTeamMember} className="flex flex-wrap items-center gap-2">
             <input
               type="text"
               value={newMemberName}
@@ -713,13 +757,26 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
             </select>
             <button
               type="submit"
-              className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 whitespace-nowrap shrink-0"
+              disabled={addingMember || !newMemberName.trim()}
+              className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <Plus className="h-3.5 w-3.5" />
-              <span>Ajouter</span>
+              <span>{addingMember ? 'Ajout...' : 'Ajouter'}</span>
             </button>
           </form>
         </div>
+
+        {teamFinanceFeedback && (
+          <div
+            className={`rounded-lg border px-3.5 py-2 text-xs ${
+              teamFinanceFeedback.type === 'ok'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                : 'border-red-200 bg-red-50 text-red-700'
+            }`}
+          >
+            {teamFinanceFeedback.text}
+          </div>
+        )}
 
         {state.members.length === 0 ? (
           <div className="py-10 text-center flex flex-col items-center">
@@ -740,7 +797,8 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
                   <th className="px-4 py-3 font-semibold">Rôle du mois</th>
                   <th className="px-4 py-3 font-semibold">Heures cette semaine</th>
                   <th className="px-4 py-3 font-semibold text-right">Part estimée (70 %)</th>
-                  <th className="px-4 py-3 font-semibold">Accord parental</th>
+                  <th className="px-4 py-3 font-semibold">Parent référent & Accord</th>
+                  <th className="px-4 py-3 font-semibold text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -791,26 +849,51 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
                         {shareEur.toFixed(2)} €
                       </td>
                       <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            type="text"
+                            defaultValue={m.parentName}
+                            onBlur={(e) => {
+                              const nextName = e.target.value.trim() || 'À renseigner';
+                              if (nextName !== m.parentName) {
+                                onUpdateMember(m.id, { parentName: nextName });
+                              }
+                            }}
+                            placeholder="Nom du parent"
+                            className="w-28 rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-700"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onUpdateMember(m.id, { parentApproved: !m.parentApproved })
+                            }
+                            className={`inline-flex items-center gap-1 text-xs font-medium whitespace-nowrap ${
+                              m.parentApproved ? 'text-emerald-700' : 'text-amber-700'
+                            }`}
+                          >
+                            {m.parentApproved ? (
+                              <>
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                <span>Validé</span>
+                              </>
+                            ) : (
+                              <>
+                                <AlertTriangle className="h-3.5 w-3.5" />
+                                <span>En attente</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right">
                         <button
                           type="button"
-                          onClick={() =>
-                            onUpdateMember(m.id, { parentApproved: !m.parentApproved })
-                          }
-                          className={`inline-flex items-center gap-1.5 text-xs font-medium ${
-                            m.parentApproved ? 'text-emerald-700' : 'text-amber-700'
-                          }`}
+                          onClick={() => onDeleteMember(m.id)}
+                          className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                          title="Retirer de la liste d’équipe"
+                          aria-label={`Retirer ${m.name}`}
                         >
-                          {m.parentApproved ? (
-                            <>
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                              <span>Validé ({m.parentName})</span>
-                            </>
-                          ) : (
-                            <>
-                              <AlertTriangle className="h-3.5 w-3.5" />
-                              <span>En attente parent</span>
-                            </>
-                          )}
+                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </td>
                     </tr>
@@ -828,12 +911,12 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
             Journal des ventes & caisse commune
           </h3>
 
-          <form onSubmit={handleAddFinanceEntry} className="grid grid-cols-1 gap-3 sm:grid-cols-4 items-end">
+          <form onSubmit={handleAddFinanceEntry} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5 items-end">
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">Client / Libellé</label>
               <input
                 type="text"
-                required
+                required={!finProjectId}
                 value={finClient}
                 onChange={(e) => setFinClient(e.target.value)}
                 placeholder="Ex : Premier client"
@@ -841,32 +924,67 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Type</label>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Projet (optionnel)</label>
               <select
-                value={finType}
-                onChange={(e) => setFinType(e.target.value as FinanceEntry['type'])}
+                value={finProjectId}
+                onChange={(e) => {
+                  const pId = e.target.value;
+                  setFinProjectId(pId);
+                  const found = state.projects.find((p) => p.id === pId);
+                  if (found && !finClient.trim()) {
+                    setFinClient(found.clientName);
+                  }
+                }}
                 className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs"
               >
-                <option value="Acompte 30 %">Acompte 30 %</option>
-                <option value="Solde">Solde</option>
-                <option value="Suivi mensuel">Suivi mensuel</option>
-                <option value="Dépense caisse commune">Dépense caisse commune</option>
+                <option value="">Hors projet / Libre</option>
+                {state.projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.clientName}
+                  </option>
+                ))}
               </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Type & Statut</label>
+              <div className="space-y-1.5">
+                <select
+                  value={finType}
+                  onChange={(e) => setFinType(e.target.value as FinanceEntry['type'])}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs"
+                >
+                  <option value="Acompte 30 %">Acompte 30 %</option>
+                  <option value="Solde">Solde</option>
+                  <option value="Suivi mensuel">Suivi mensuel</option>
+                  <option value="Dépense caisse commune">Dépense caisse commune</option>
+                </select>
+                <select
+                  value={finStatus}
+                  onChange={(e) => setFinStatus(e.target.value as FinanceEntry['status'])}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs"
+                >
+                  <option value="Payé">Payé (encaissé)</option>
+                  <option value="Devis signé">Devis signé</option>
+                  <option value="En attente">En attente</option>
+                </select>
+              </div>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">Montant (€)</label>
               <input
                 type="number"
+                min={0}
                 value={finAmount}
-                onChange={(e) => setFinAmount(Number(e.target.value) || 0)}
+                onChange={(e) => setFinAmount(Math.max(0, Number(e.target.value) || 0))}
                 className="w-full rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-mono tabular-nums"
               />
             </div>
             <button
               type="submit"
-              className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 whitespace-nowrap shrink-0"
+              disabled={addingFinance}
+              className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60 whitespace-nowrap shrink-0"
             >
-              Enregistrer
+              {addingFinance ? 'Ajout...' : 'Enregistrer'}
             </button>
           </form>
 
@@ -883,16 +1001,42 @@ export const TeamFinanceView: React.FC<TeamFinanceViewProps> = ({
           ) : (
             <div className="divide-y divide-slate-100">
               {state.finances.map((f) => (
-                <div key={f.id} className="py-3 flex items-center justify-between gap-4 text-xs">
-                  <div>
+                <div key={f.id} className="py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0">
                     <div className="font-semibold text-slate-900">{f.label}</div>
                     <div className="text-slate-500 mt-0.5 font-mono tabular-nums">
                       {f.invoiceRef} · {f.date} · {f.billingParentOrEntity}
                     </div>
                   </div>
-                  <div className="font-mono tabular-nums font-semibold text-slate-900">
-                    {f.type === 'Dépense caisse commune' ? '-' : '+'}
-                    {f.amountEur} €
+                  <div className="flex items-center gap-3 shrink-0">
+                    <select
+                      value={f.status}
+                      onChange={(e) =>
+                        onUpdateFinance(f.id, { status: e.target.value as FinanceEntry['status'] })
+                      }
+                      className={`rounded border px-2 py-1 text-[11px] font-medium ${
+                        f.status === 'Payé'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                          : 'border-slate-200 bg-white text-slate-700'
+                      }`}
+                    >
+                      <option value="Payé">Payé</option>
+                      <option value="Devis signé">Devis signé</option>
+                      <option value="En attente">En attente</option>
+                    </select>
+                    <div className="font-mono tabular-nums font-semibold text-slate-900 w-20 text-right">
+                      {f.type === 'Dépense caisse commune' ? '-' : '+'}
+                      {f.amountEur} €
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onDeleteFinance(f.id)}
+                      className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                      title="Supprimer cette écriture"
+                      aria-label={`Supprimer ${f.label}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
               ))}

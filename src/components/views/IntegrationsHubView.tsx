@@ -79,17 +79,21 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
   const [loadingDrive, setLoadingDrive] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [confirmDriveFolder, setConfirmDriveFolder] = useState(false);
+  const [creatingDriveFolder, setCreatingDriveFolder] = useState(false);
 
   // GitHub Explorer
   const [githubRepos, setGithubRepos] = useState<Array<{ id: number; full_name: string; html_url: string; updated_at: string }>>([]);
   const [newRepoName, setNewRepoName] = useState('');
   const [confirmGithubCreate, setConfirmGithubCreate] = useState(false);
+  const [creatingGithubRepo, setCreatingGithubRepo] = useState(false);
 
   // Discord Webhook & Guilds
   const [webhookInput, setWebhookInput] = useState(state.settings.discordWebhookUrl || '');
+  const [savingWebhook, setSavingWebhook] = useState(false);
   const [discordMessage, setDiscordMessage] = useState('');
   const [discordGuilds, setDiscordGuilds] = useState<Array<{ id: string; name: string }>>([]);
   const [confirmDiscordSend, setConfirmDiscordSend] = useState(false);
+  const [sendingDiscord, setSendingDiscord] = useState(false);
 
   // Figma Inspector
   const [figmaKey, setFigmaKey] = useState('');
@@ -147,12 +151,19 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
   }, [providerStatuses]);
 
   const handleDisconnectProvider = async (provider: string) => {
-    await fetch(`/api/oauth/${provider}/disconnect`, { method: 'POST' });
-    await onRefreshOAuthStatuses();
+    try {
+      const res = await fetch(`/api/oauth/${provider}/disconnect`, { method: 'POST' });
+      if (!res.ok) throw new Error('Impossible de déconnecter ce service.');
+      await onRefreshOAuthStatuses();
+      setStatusMessage({ type: 'ok', text: `Compte ${provider} déconnecté.` });
+    } catch (err: any) {
+      setStatusMessage({ type: 'err', text: err?.message || 'Erreur lors de la déconnexion.' });
+    }
   };
 
   const executeCreateDriveFolder = async () => {
     if (!workspaceToken || !newFolderName.trim()) return;
+    setCreatingDriveFolder(true);
     try {
       await createGoogleDriveFolder(workspaceToken, newFolderName.trim());
       setNewFolderName('');
@@ -161,12 +172,14 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
     } catch (err: any) {
       setStatusMessage({ type: 'err', text: err.message });
     } finally {
+      setCreatingDriveFolder(false);
       setConfirmDriveFolder(false);
     }
   };
 
   const executeCreateGithubRepo = async () => {
     if (!newRepoName.trim()) return;
+    setCreatingGithubRepo(true);
     try {
       const res = await fetch('/api/integrations/github/create-repo', {
         method: 'POST',
@@ -182,11 +195,26 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
     } catch (err: any) {
       setStatusMessage({ type: 'err', text: err.message });
     } finally {
+      setCreatingGithubRepo(false);
       setConfirmGithubCreate(false);
     }
   };
 
+  const handleSaveWebhookUrl = async () => {
+    setSavingWebhook(true);
+    setStatusMessage(null);
+    try {
+      await onSaveSettings({ discordWebhookUrl: webhookInput.trim() });
+      setStatusMessage({ type: 'ok', text: 'URL du webhook Discord enregistrée.' });
+    } catch (err: any) {
+      setStatusMessage({ type: 'err', text: err?.message || 'Sauvegarde impossible.' });
+    } finally {
+      setSavingWebhook(false);
+    }
+  };
+
   const executeSendDiscordMessage = async () => {
+    setSendingDiscord(true);
     try {
       await onSaveSettings({ discordWebhookUrl: webhookInput.trim() });
       const res = await fetch('/api/integrations/discord/send-webhook', {
@@ -204,6 +232,7 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
     } catch (err: any) {
       setStatusMessage({ type: 'err', text: err.message });
     } finally {
+      setSendingDiscord(false);
       setConfirmDiscordSend(false);
     }
   };
@@ -225,10 +254,14 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
     }
   };
 
-  const copyText = (val: string) => {
-    navigator.clipboard.writeText(val);
-    setCopiedUri(val);
-    setTimeout(() => setCopiedUri(''), 1500);
+  const copyText = async (val: string) => {
+    try {
+      await navigator.clipboard.writeText(val);
+      setCopiedUri(val);
+      setTimeout(() => setCopiedUri(''), 1500);
+    } catch {
+      setStatusMessage({ type: 'err', text: 'Copie bloquée par le navigateur.' });
+    }
   };
 
   const legalPreview = `Mentions légales : Site édité par ${legalOwner || '[Nom du client / responsable]'} · Contact : ${legalEmail || '[Email / Téléphone]'} · Hébergement : ${legalHost}.`;
@@ -239,6 +272,7 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
         open={confirmDriveFolder}
         title="Créer un dossier dans Google Drive ?"
         description={`Un nouveau dossier nommé "${newFolderName}" sera créé dans votre Google Drive connecté.`}
+        loading={creatingDriveFolder}
         onConfirm={executeCreateDriveFolder}
         onCancel={() => setConfirmDriveFolder(false)}
       />
@@ -246,6 +280,7 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
         open={confirmGithubCreate}
         title="Créer un dépôt GitHub ?"
         description={`Un nouveau dépôt public nommé "${newRepoName}" sera créé sur votre compte GitHub connecté.`}
+        loading={creatingGithubRepo}
         onConfirm={executeCreateGithubRepo}
         onCancel={() => setConfirmGithubCreate(false)}
       />
@@ -253,6 +288,7 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
         open={confirmDiscordSend}
         title="Publier ce message sur Discord ?"
         description={`Le message sera envoyé immédiatement dans le salon configuré par votre Webhook Discord.`}
+        loading={sendingDiscord}
         onConfirm={executeSendDiscordMessage}
         onCancel={() => setConfirmDiscordSend(false)}
       />
@@ -466,13 +502,23 @@ export const IntegrationsHubView: React.FC<IntegrationsHubViewProps> = ({
             <label className="block text-xs font-medium text-slate-700 mb-1">
               URL Webhook du salon Discord de l’agence (fonctionne immédiatement)
             </label>
-            <input
-              type="url"
-              value={webhookInput}
-              onChange={(e) => setWebhookInput(e.target.value)}
-              placeholder="https://discord.com/api/webhooks/..."
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs font-mono"
-            />
+            <div className="flex gap-2">
+              <input
+                type="url"
+                value={webhookInput}
+                onChange={(e) => setWebhookInput(e.target.value)}
+                placeholder="https://discord.com/api/webhooks/..."
+                className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-mono"
+              />
+              <button
+                type="button"
+                disabled={savingWebhook}
+                onClick={handleSaveWebhookUrl}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
+              >
+                {savingWebhook ? 'Sauvegarde...' : 'Sauvegarder'}
+              </button>
+            </div>
           </div>
 
           <div>

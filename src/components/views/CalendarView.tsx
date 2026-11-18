@@ -29,12 +29,14 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   const [dateStr, setDateStr] = useState(() => new Date().toISOString().slice(0, 10));
   const [timeStr, setTimeStr] = useState('17:30');
   const [durationMin, setDurationMin] = useState(20);
+  const [projectId, setProjectId] = useState('');
   const [notes, setNotes] = useState('');
   const [syncToGoogle, setSyncToGoogle] = useState(true);
 
   const [googleEvents, setGoogleEvents] = useState<GoogleCalendarEvent[]>([]);
   const [loadingGoogle, setLoadingGoogle] = useState(false);
   const [googleError, setGoogleError] = useState('');
+  const [formError, setFormError] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -60,7 +62,16 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
 
   const handleSubmitForm = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    setFormError('');
+    if (!title.trim()) {
+      setFormError('Veuillez saisir un titre pour le rendez-vous.');
+      return;
+    }
+    const parsed = new Date(`${dateStr}T${timeStr || '09:00'}:00`);
+    if (!dateStr || Number.isNaN(parsed.getTime())) {
+      setFormError('Veuillez sélectionner une date et une heure valides.');
+      return;
+    }
     if (syncToGoogle && workspaceToken) {
       setConfirmOpen(true);
     } else {
@@ -70,8 +81,13 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
 
   const executeCreate = async (pushGoogle: boolean) => {
     setSaving(true);
+    setFormError('');
     try {
-      const dateIso = new Date(`${dateStr}T${timeStr}:00`).toISOString();
+      const parsed = new Date(`${dateStr}T${timeStr || '09:00'}:00`);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new Error('Date ou heure invalide.');
+      }
+      const dateIso = parsed.toISOString();
       let googleCalendarEventId: string | undefined;
       if (pushGoogle && workspaceToken) {
         const created = await createGoogleCalendarEvent(workspaceToken, {
@@ -88,11 +104,15 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         type,
         dateIso,
         durationMin,
+        projectId: projectId || undefined,
         notes,
         googleCalendarEventId,
       });
       setTitle('');
       setNotes('');
+      setProjectId('');
+    } catch (err: any) {
+      setFormError(err?.message || 'Impossible d’enregistrer le rendez-vous.');
     } finally {
       setSaving(false);
       setConfirmOpen(false);
@@ -145,6 +165,12 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
             <h2 className="text-sm font-semibold text-slate-900">Planifier un rendez-vous</h2>
           </div>
 
+          {formError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              {formError}
+            </div>
+          )}
+
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">Titre</label>
             <input
@@ -173,11 +199,32 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
             </select>
           </div>
 
+          {state.projects.length > 0 && (
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Projet lié (optionnel)
+              </label>
+              <select
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value)}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs"
+              >
+                <option value="">Aucun projet spécifique</option>
+                {state.projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.clientName}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div className="grid grid-cols-3 gap-2">
             <div className="col-span-2">
               <label className="block text-xs font-medium text-slate-700 mb-1">Date</label>
               <input
                 type="date"
+                required
                 value={dateStr}
                 onChange={(e) => setDateStr(e.target.value)}
                 className="w-full rounded-lg border border-slate-200 px-2.5 py-2 text-xs font-mono"
@@ -187,6 +234,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
               <label className="block text-xs font-medium text-slate-700 mb-1">Heure</label>
               <input
                 type="time"
+                required
                 value={timeStr}
                 onChange={(e) => setTimeStr(e.target.value)}
                 className="w-full rounded-lg border border-slate-200 px-2 py-2 text-xs font-mono"
@@ -201,7 +249,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
               min={5}
               max={120}
               value={durationMin}
-              onChange={(e) => setDurationMin(Number(e.target.value) || 20)}
+              onChange={(e) => setDurationMin(Math.max(5, Number(e.target.value) || 20))}
               className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs font-mono tabular-nums"
             />
           </div>
@@ -231,9 +279,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
           <button
             type="submit"
             disabled={saving}
-            className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-medium text-white hover:bg-blue-700"
+            className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
           >
-            Enregistrer le rendez-vous
+            {saving ? 'Enregistrement...' : 'Enregistrer le rendez-vous'}
           </button>
         </form>
 
