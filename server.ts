@@ -341,11 +341,12 @@ async function startServer() {
     const email = verifiedCookie?.email || null;
     const isAllowed = Boolean(email && state.settings.allowedEmails.includes(email));
     const isAdmin = Boolean(email && state.settings.adminEmails.includes(email));
+    const hasPasswordAdmin = state.settings.allowedEmails.some((e) => hasMemberPassword(e));
 
     res.json({
       lockEnabled: state.settings.lockEnabled,
       agencyName: state.settings.agencyName,
-      hasAdmin: state.settings.allowedEmails.length > 0,
+      hasAdmin: state.settings.allowedEmails.length > 0 && hasPasswordAdmin,
       authenticated: Boolean(email),
       authorized: state.settings.lockEnabled ? isAllowed : true,
       email,
@@ -371,7 +372,8 @@ async function startServer() {
     }
 
     const state = loadAgencyState();
-    if (state.settings.allowedEmails.length > 0) {
+    const hasPasswordAdmin = state.settings.allowedEmails.some((e) => hasMemberPassword(e));
+    if (state.settings.allowedEmails.length > 0 && hasPasswordAdmin) {
       res.status(403).json({
         error: 'Un administrateur existe déjà. Connectez-vous avec votre e-mail et votre mot de passe.',
       });

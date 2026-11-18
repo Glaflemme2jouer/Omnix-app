@@ -143,7 +143,10 @@ export async function initAgencyStore(): Promise<void> {
     if (existing) {
       cachedState = normalizeState(existing);
     } else {
-      const seed = fs.existsSync(DB_PATH) ? readLocalFileState() : getInitialState();
+      const seed =
+        process.env.NODE_ENV !== 'production' && fs.existsSync(DB_PATH)
+          ? readLocalFileState()
+          : getInitialState();
       cachedState = normalizeState(seed);
       await kvSet(KV_KEY, cachedState);
     }
