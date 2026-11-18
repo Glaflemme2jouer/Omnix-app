@@ -7,10 +7,12 @@ import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
-import { loadAgencyState, resetAgencyState, saveAgencyState } from './server/store.ts';
+import { initPostgres, isPostgresEnabled, kvGet, kvSet } from './server/db.ts';
+import { initAgencyStore, loadAgencyState, resetAgencyState, saveAgencyState } from './server/store.ts';
 import {
   deleteMemberPassword,
   hasMemberPassword,
+  initCredentialsStore,
   setMemberPassword,
   verifyMemberPassword,
 } from './server/credentials.ts';
@@ -34,34 +36,62 @@ const firebaseConfig = fs.existsSync(firebaseConfigPath)
   ? (JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf-8')) as { apiKey?: string; projectId?: string })
   : {};
 
+const SESSION_SECRET_KV_KEY = 'session_secret';
 let cachedCookieSecret: string | null = null;
-function getAuthCookieSecret(): string {
-  if (cachedCookieSecret) return cachedCookieSecret;
+
+async function initSessionSecret(): Promise<void> {
   if (process.env.SESSION_SECRET && process.env.SESSION_SECRET.length >= 16) {
     cachedCookieSecret = process.env.SESSION_SECRET;
-    return cachedCookieSecret;
+    return;
   }
+
   const dataDir = path.resolve(process.cwd(), '.data');
   const secretPath = path.join(dataDir, '.session-secret');
+  let localSecret = '';
   try {
     if (fs.existsSync(secretPath)) {
       const existing = fs.readFileSync(secretPath, 'utf-8').trim();
       if (existing.length >= 32) {
-        cachedCookieSecret = existing;
-        return cachedCookieSecret;
+        localSecret = existing;
       }
     }
+  } catch {
+    localSecret = '';
+  }
+
+  if (isPostgresEnabled()) {
+    const stored = await kvGet<string>(SESSION_SECRET_KV_KEY);
+    if (typeof stored === 'string' && stored.length >= 32) {
+      cachedCookieSecret = stored;
+      return;
+    }
+    const secret = localSecret || crypto.randomBytes(32).toString('hex');
+    await kvSet(SESSION_SECRET_KV_KEY, secret);
+    cachedCookieSecret = secret;
+    return;
+  }
+
+  if (localSecret) {
+    cachedCookieSecret = localSecret;
+    return;
+  }
+
+  try {
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
     const generated = crypto.randomBytes(32).toString('hex');
     fs.writeFileSync(secretPath, generated, { encoding: 'utf-8', mode: 0o600 });
     cachedCookieSecret = generated;
-    return cachedCookieSecret;
   } catch {
     cachedCookieSecret = crypto.randomBytes(32).toString('hex');
-    return cachedCookieSecret;
   }
+}
+
+function getAuthCookieSecret(): string {
+  if (cachedCookieSecret) return cachedCookieSecret;
+  cachedCookieSecret = crypto.randomBytes(32).toString('hex');
+  return cachedCookieSecret;
 }
 
 function signAuthCookie(email: string): string {
@@ -282,7 +312,23 @@ function extractHtmlDocument(rawText: string): string {
   return candidate;
 }
 
+const asyncRoute =
+  (fn: (req: Request, res: Response) => Promise<void> | void) =>
+  (req: Request, res: Response, next: express.NextFunction) => {
+    Promise.resolve(fn(req, res)).catch(next);
+  };
+
 async function startServer() {
+  const postgresReady = await initPostgres();
+  await initSessionSecret();
+  await initAgencyStore();
+  await initCredentialsStore();
+  console.log(
+    postgresReady
+      ? 'Omnix persistence: PostgreSQL (DATABASE_URL) actif.'
+      : 'Omnix persistence: stockage local (.data/*.json). Configurez DATABASE_URL pour persister sur Render.'
+  );
+
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '4mb' }));
@@ -308,7 +354,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/auth/register-admin', (req, res) => {
+  app.post('/api/auth/register-admin', asyncRoute(async (req, res) => {
     const { name, email, password } = req.body as {
       name?: string;
       email?: string;
@@ -332,7 +378,7 @@ async function startServer() {
       return;
     }
 
-    setMemberPassword(cleanEmail, password);
+    await setMemberPassword(cleanEmail, password);
     state.settings.allowedEmails = [cleanEmail];
     state.settings.adminEmails = [cleanEmail];
     ensureMemberInState(state, {
@@ -340,7 +386,7 @@ async function startServer() {
       name: name?.trim() || cleanEmail.split('@')[0],
       preferredRole: 'Chef de projet',
     });
-    saveAgencyState(state);
+    await saveAgencyState(state);
 
     setAuthCookie(req, res, cleanEmail);
     res.json({
@@ -348,9 +394,9 @@ async function startServer() {
       email: cleanEmail,
       isAdmin: true,
     });
-  });
+  }));
 
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', asyncRoute(async (req, res) => {
     const { email, password } = req.body as { email?: string; password?: string };
     const cleanEmail = (email || '').trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes('@') || !password) {
@@ -390,7 +436,7 @@ async function startServer() {
 
     const { changed } = ensureMemberInState(state, { email: cleanEmail });
     if (changed) {
-      saveAgencyState(state);
+      await saveAgencyState(state);
     }
 
     setAuthCookie(req, res, cleanEmail);
@@ -399,7 +445,7 @@ async function startServer() {
       email: cleanEmail,
       isAdmin: state.settings.adminEmails.includes(cleanEmail),
     });
-  });
+  }));
 
   app.post('/api/auth/session', async (req, res) => {
     try {
@@ -416,7 +462,7 @@ async function startServer() {
       if (state.settings.allowedEmails.length === 0) {
         state.settings.allowedEmails = [verified.email];
         state.settings.adminEmails = [verified.email];
-        saveAgencyState(state);
+        await saveAgencyState(state);
       }
 
       if (state.settings.lockEnabled && !state.settings.allowedEmails.includes(verified.email)) {
@@ -474,7 +520,7 @@ async function startServer() {
   });
 
   // --- Password & Access Management (authenticated) ---
-  app.post('/api/auth/change-password', (req, res) => {
+  app.post('/api/auth/change-password', asyncRoute(async (req, res) => {
     const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
     const { newPassword, email } = req.body as { newPassword?: string; email?: string };
     const targetEmail = authEmail || (email || '').trim().toLowerCase();
@@ -486,16 +532,16 @@ async function startServer() {
       res.status(400).json({ error: 'Le nouveau mot de passe doit contenir au moins 6 caractères.' });
       return;
     }
-    setMemberPassword(targetEmail, newPassword);
+    await setMemberPassword(targetEmail, newPassword);
     res.json({ ok: true, email: targetEmail });
-  });
+  }));
 
   app.get('/api/agency/access/status', (_req, res) => {
     const state = loadAgencyState();
     res.json({ members: buildAccessList(state) });
   });
 
-  app.post('/api/agency/access/member', (req, res) => {
+  app.post('/api/agency/access/member', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
     if (
@@ -524,7 +570,7 @@ async function startServer() {
         res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères.' });
         return;
       }
-      setMemberPassword(cleanEmail, password);
+      await setMemberPassword(cleanEmail, password);
     }
 
     if (!state.settings.allowedEmails.includes(cleanEmail)) {
@@ -550,11 +596,11 @@ async function startServer() {
       ensureMemberInState(state, { email: cleanEmail, name: name.trim() });
     }
 
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json({ state, accessMembers: buildAccessList(state) });
-  });
+  }));
 
-  app.delete('/api/agency/access/member', (req, res) => {
+  app.delete('/api/agency/access/member', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
     if (
@@ -582,10 +628,10 @@ async function startServer() {
 
     state.settings.allowedEmails = nextAllowed;
     state.settings.adminEmails = nextAdmins;
-    deleteMemberPassword(cleanEmail);
-    saveAgencyState(state);
+    await deleteMemberPassword(cleanEmail);
+    await saveAgencyState(state);
     res.json({ state, accessMembers: buildAccessList(state) });
-  });
+  }));
 
   // --- Agency Shared State API ---
   app.get('/api/agency/state', (_req, res) => {
@@ -593,7 +639,7 @@ async function startServer() {
     res.json(state);
   });
 
-  app.post('/api/agency/import', (req, res) => {
+  app.post('/api/agency/import', asyncRoute(async (req, res) => {
     const current = loadAgencyState();
     const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
     if (
@@ -638,16 +684,16 @@ async function startServer() {
       roadmap: Array.isArray(incoming.roadmap) ? incoming.roadmap : current.roadmap,
     };
 
-    saveAgencyState(merged);
+    await saveAgencyState(merged);
     res.json({ state: merged });
-  });
+  }));
 
-  app.post('/api/agency/reset', (_req, res) => {
-    const fresh = resetAgencyState();
+  app.post('/api/agency/reset', asyncRoute(async (_req, res) => {
+    const fresh = await resetAgencyState();
     res.json(fresh);
-  });
+  }));
 
-  app.post('/api/agency/team/register', (req, res) => {
+  app.post('/api/agency/team/register', asyncRoute(async (req, res) => {
     const { email, name, photoUrl, preferredRole } = req.body as {
       email?: string;
       name?: string;
@@ -666,12 +712,12 @@ async function startServer() {
       preferredRole,
     });
     if (changed) {
-      saveAgencyState(state);
+      await saveAgencyState(state);
     }
     res.json({ member, state });
-  });
+  }));
 
-  app.put('/api/agency/members/:id', (req, res) => {
+  app.put('/api/agency/members/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const idx = state.members.findIndex((m) => m.id === req.params.id);
     if (idx === -1) {
@@ -679,11 +725,11 @@ async function startServer() {
       return;
     }
     state.members[idx] = { ...state.members[idx], ...req.body, id: req.params.id };
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.post('/api/agency/members', (req, res) => {
+  app.post('/api/agency/members', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const member: TeamMember = {
       id: `mem-${Date.now()}`,
@@ -697,18 +743,18 @@ async function startServer() {
       schoolPriorityOk: true,
     };
     state.members.push(member);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.delete('/api/agency/members/:id', (req, res) => {
+  app.delete('/api/agency/members/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     state.members = state.members.filter((m) => m.id !== req.params.id);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.post('/api/agency/projects', (req, res) => {
+  app.post('/api/agency/projects', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const body = req.body as Partial<ClientProject>;
     const project: ClientProject = {
@@ -758,11 +804,11 @@ async function startServer() {
       updatedAt: new Date().toISOString(),
     };
     state.projects.unshift(project);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json({ project, state });
-  });
+  }));
 
-  app.put('/api/agency/projects/:id', (req, res) => {
+  app.put('/api/agency/projects/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const idx = state.projects.findIndex((p) => p.id === req.params.id);
     if (idx === -1) {
@@ -775,19 +821,19 @@ async function startServer() {
       id: req.params.id,
       updatedAt: new Date().toISOString(),
     };
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json({ project: state.projects[idx], state });
-  });
+  }));
 
-  app.delete('/api/agency/projects/:id', (req, res) => {
+  app.delete('/api/agency/projects/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     state.projects = state.projects.filter((p) => p.id !== req.params.id);
     state.tasks = state.tasks.filter((t) => t.projectId !== req.params.id);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.post('/api/agency/tasks', (req, res) => {
+  app.post('/api/agency/tasks', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const task: KanbanTask = {
       id: `task-${Date.now()}`,
@@ -798,11 +844,11 @@ async function startServer() {
       dueDate: req.body.dueDate || new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10),
     };
     state.tasks.unshift(task);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.put('/api/agency/tasks/:id', (req, res) => {
+  app.put('/api/agency/tasks/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const idx = state.tasks.findIndex((t) => t.id === req.params.id);
     if (idx === -1) {
@@ -810,18 +856,18 @@ async function startServer() {
       return;
     }
     state.tasks[idx] = { ...state.tasks[idx], ...req.body, id: req.params.id };
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.delete('/api/agency/tasks/:id', (req, res) => {
+  app.delete('/api/agency/tasks/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     state.tasks = state.tasks.filter((t) => t.id !== req.params.id);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.post('/api/agency/appointments', (req, res) => {
+  app.post('/api/agency/appointments', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const appt: AgencyAppointment = {
       id: `appt-${Date.now()}`,
@@ -835,18 +881,18 @@ async function startServer() {
       googleCalendarEventId: req.body.googleCalendarEventId,
     };
     state.appointments.push(appt);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json({ appointment: appt, state });
-  });
+  }));
 
-  app.delete('/api/agency/appointments/:id', (req, res) => {
+  app.delete('/api/agency/appointments/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     state.appointments = state.appointments.filter((a) => a.id !== req.params.id);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.post('/api/agency/prospects', (req, res) => {
+  app.post('/api/agency/prospects', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const prospect: Prospect = {
       id: `pros-${Date.now()}`,
@@ -863,11 +909,11 @@ async function startServer() {
       notes: req.body.notes || '',
     };
     state.prospects.unshift(prospect);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.put('/api/agency/prospects/:id', (req, res) => {
+  app.put('/api/agency/prospects/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const idx = state.prospects.findIndex((p) => p.id === req.params.id);
     if (idx === -1) {
@@ -875,18 +921,18 @@ async function startServer() {
       return;
     }
     state.prospects[idx] = { ...state.prospects[idx], ...req.body, id: req.params.id };
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.delete('/api/agency/prospects/:id', (req, res) => {
+  app.delete('/api/agency/prospects/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     state.prospects = state.prospects.filter((p) => p.id !== req.params.id);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.post('/api/agency/finances', (req, res) => {
+  app.post('/api/agency/finances', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const entry: FinanceEntry = {
       id: `fin-${Date.now()}`,
@@ -902,11 +948,11 @@ async function startServer() {
       date: req.body.date || new Date().toISOString().slice(0, 10),
     };
     state.finances.unshift(entry);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.put('/api/agency/finances/:id', (req, res) => {
+  app.put('/api/agency/finances/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const idx = state.finances.findIndex((f) => f.id === req.params.id);
     if (idx === -1) {
@@ -914,39 +960,39 @@ async function startServer() {
       return;
     }
     state.finances[idx] = { ...state.finances[idx], ...req.body, id: req.params.id };
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.delete('/api/agency/finances/:id', (req, res) => {
+  app.delete('/api/agency/finances/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     state.finances = state.finances.filter((f) => f.id !== req.params.id);
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
-  app.put('/api/agency/checklist/:id', (req, res) => {
+  app.put('/api/agency/checklist/:id', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const item = state.preSaleChecklist.find((c) => c.id === req.params.id);
     if (item) {
       item.completed = Boolean(req.body.completed);
-      saveAgencyState(state);
+      await saveAgencyState(state);
     }
     res.json(state);
-  });
+  }));
 
-  app.put('/api/agency/roadmap/:weekId/tasks/:taskId', (req, res) => {
+  app.put('/api/agency/roadmap/:weekId/tasks/:taskId', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const week = state.roadmap.find((w) => w.id === req.params.weekId);
     const task = week?.tasks.find((t) => t.id === req.params.taskId);
     if (task) {
       task.completed = Boolean(req.body.completed);
-      saveAgencyState(state);
+      await saveAgencyState(state);
     }
     res.json(state);
-  });
+  }));
 
-  app.put('/api/agency/settings', (req, res) => {
+  app.put('/api/agency/settings', asyncRoute(async (req, res) => {
     const state = loadAgencyState();
     const body = req.body as Partial<AgencyState['settings']>;
     const authEmail = ((req as any).authEmail as string | undefined)?.toLowerCase();
@@ -1003,9 +1049,9 @@ async function startServer() {
       adminEmails: nextAdmins,
       lockEnabled: nextLock,
     };
-    saveAgencyState(state);
+    await saveAgencyState(state);
     res.json(state);
-  });
+  }));
 
   // --- Google AI Studio (Gemini) Integrated Endpoints ---
   app.post('/api/ai/generate-site', async (req, res) => {
@@ -1942,9 +1988,19 @@ ${JSON.stringify(snapshot, null, 2)}`,
     });
   }
 
+  app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {
+    console.error('Server error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err?.message || 'Erreur serveur lors de la sauvegarde.' });
+    }
+  });
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Omnix server running on port ${PORT}`);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Failed to start Omnix server:', err);
+  process.exit(1);
+});

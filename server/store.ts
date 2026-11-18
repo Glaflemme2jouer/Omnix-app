@@ -1,9 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import type { AgencyState } from '../src/types.ts';
+import { isPostgresEnabled, kvGet, kvSet } from './db.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const DB_PATH = path.join(DATA_DIR, 'agency-db.json');
+const KV_KEY = 'agency_state';
+
+let cachedState: AgencyState | null = null;
 
 export function getInitialState(): AgencyState {
   const today = new Date();
@@ -85,7 +89,38 @@ export function getInitialState(): AgencyState {
   };
 }
 
-export function loadAgencyState(): AgencyState {
+function normalizeState(parsed: Partial<AgencyState> | null | undefined): AgencyState {
+  const initial = getInitialState();
+  const base = parsed && typeof parsed === 'object' ? parsed : {};
+  return {
+    ...initial,
+    ...base,
+    settings: {
+      ...initial.settings,
+      ...(base.settings || {}),
+      allowedEmails: Array.isArray(base.settings?.allowedEmails)
+        ? base.settings.allowedEmails.map((e) => e.trim().toLowerCase()).filter(Boolean)
+        : [],
+      adminEmails: Array.isArray(base.settings?.adminEmails)
+        ? base.settings.adminEmails.map((e) => e.trim().toLowerCase()).filter(Boolean)
+        : [],
+      lockEnabled:
+        typeof base.settings?.lockEnabled === 'boolean' ? base.settings.lockEnabled : true,
+    },
+    members: Array.isArray(base.members) ? base.members : [],
+    projects: Array.isArray(base.projects) ? base.projects : [],
+    tasks: Array.isArray(base.tasks) ? base.tasks : [],
+    appointments: Array.isArray(base.appointments) ? base.appointments : [],
+    prospects: Array.isArray(base.prospects) ? base.prospects : [],
+    finances: Array.isArray(base.finances) ? base.finances : [],
+    preSaleChecklist: Array.isArray(base.preSaleChecklist)
+      ? base.preSaleChecklist
+      : initial.preSaleChecklist,
+    roadmap: Array.isArray(base.roadmap) ? base.roadmap : initial.roadmap,
+  };
+}
+
+function readLocalFileState(): AgencyState {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -96,35 +131,58 @@ export function loadAgencyState(): AgencyState {
       return initial;
     }
     const raw = fs.readFileSync(DB_PATH, 'utf-8');
-    const parsed = JSON.parse(raw) as AgencyState;
-    parsed.settings = {
-      ...getInitialState().settings,
-      ...(parsed.settings || {}),
-      allowedEmails: Array.isArray(parsed.settings?.allowedEmails)
-        ? parsed.settings.allowedEmails.map((e) => e.trim().toLowerCase()).filter(Boolean)
-        : [],
-      adminEmails: Array.isArray(parsed.settings?.adminEmails)
-        ? parsed.settings.adminEmails.map((e) => e.trim().toLowerCase()).filter(Boolean)
-        : [],
-      lockEnabled:
-        typeof parsed.settings?.lockEnabled === 'boolean' ? parsed.settings.lockEnabled : true,
-    };
-    return parsed;
+    return normalizeState(JSON.parse(raw) as Partial<AgencyState>);
   } catch {
     return getInitialState();
   }
 }
 
-export function saveAgencyState(state: AgencyState): AgencyState {
+export async function initAgencyStore(): Promise<void> {
+  if (isPostgresEnabled()) {
+    const existing = await kvGet<Partial<AgencyState>>(KV_KEY);
+    if (existing) {
+      cachedState = normalizeState(existing);
+    } else {
+      const seed = fs.existsSync(DB_PATH) ? readLocalFileState() : getInitialState();
+      cachedState = normalizeState(seed);
+      await kvSet(KV_KEY, cachedState);
+    }
+    return;
+  }
+
+  cachedState = readLocalFileState();
+}
+
+export function loadAgencyState(): AgencyState {
+  if (isPostgresEnabled()) {
+    if (!cachedState) {
+      cachedState = getInitialState();
+    }
+    return structuredClone(cachedState);
+  }
+  const fileState = readLocalFileState();
+  cachedState = fileState;
+  return structuredClone(fileState);
+}
+
+export async function saveAgencyState(state: AgencyState): Promise<AgencyState> {
+  const normalized = normalizeState(state);
+  cachedState = structuredClone(normalized);
+
+  if (isPostgresEnabled()) {
+    await kvSet(KV_KEY, cachedState);
+    return normalized;
+  }
+
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
   const tmpPath = `${DB_PATH}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf-8');
+  fs.writeFileSync(tmpPath, JSON.stringify(normalized, null, 2), 'utf-8');
   fs.renameSync(tmpPath, DB_PATH);
-  return state;
+  return normalized;
 }
 
-export function resetAgencyState(): AgencyState {
+export async function resetAgencyState(): Promise<AgencyState> {
   return saveAgencyState(getInitialState());
 }
