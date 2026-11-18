@@ -1,0 +1,6 @@
+{
+  "name": "Atelier Web Junior",
+  "description": "Tableau de bord tout-en-un pour mini-entreprise de création de sites web entre lycéens : Google AI Studio, Google Calendar, Google Drive, Gmail, Google Forms, GitHub, Discord, Figma et Netlify intégrés.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
